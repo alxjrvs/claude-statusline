@@ -6,30 +6,34 @@
 #
 #   "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" }
 #
-# Reads the Claude Code statusline JSON on stdin and emits 3–6 colored lines:
-#   Line 1: repo/dir [ branch] [ worktree] [ #N: state] [C: counters] [+N/-M]
-#   Line 2: [M: model] [E: effort]
-#   Line 3: CTX  <bar w/ amber autocompact cell> N% [AC] [200k+]
-#   Line 4: 5h   <bar> N% [time left] [delta]
-#   Line 5: 7d   <bar> N% [time left] [delta]
-#   Line 6: [$cost ($/h) · today $X]
+# Reads the Claude Code statusline JSON on stdin and emits 3-6 colored lines:
+#   Line 1: repo/dir [@branch(/worktree)][#N:state][counters][+N/-M]
+#   Line 2: [model ctxflag effort style]  e.g. [Opus 4.8 1M High Explanatory]
+#   Line 3: CTX <bar w/ amber autocompact cell> N% AC 200k+
+#   Line 4: 5h  <bar> N% -Xh Ym [delta]
+#   Line 5: 7d  <bar> N% -Xd Yh [delta]
+#   Line 6: [$cost ($/h)]
 #
-# Line 1 uses Nerd Font glyphs — install a Nerd Font (https://nerdfonts.com)
-# or they render as tofu boxes. Everything is degrade-gracefully: missing
+# Pure ASCII; no Nerd Font required. Everything degrades gracefully: missing
 # fields just drop their segment.
 #
 # Bash 3.2 compatible (macOS system bash).
 
-# ── Byte-sequence primitives (bash 3.2 has no $'\uXXXX') ──────────────────
+# ── Primitives ────────────────────────────────────────────────────────────
+# Bars + sigils are pure ASCII: width-deterministic on every terminal (incl.
+# cmux's re-emulated grid) and no Nerd Font dependency.
 ESC=$(printf '\033')
 BEL=$(printf '\007')
-PIP_FILL=$(printf '\xe2\x96\xb0')       # ▰  U+25B0
-PIP_EMPTY=$(printf '\xe2\x96\xb1')      # ▱  U+25B1
-PIP_OVERFLOW='!'                        # burn-projection overflow marker (rendered bold red)
-GLYPH_BRANCH=$(printf '\xee\x82\xa0')   #   U+E0A0  powerline branch
-GLYPH_WORKTREE=$(printf '\xef\x83\xa8') #  U+F0E8  fa sitemap
-GLYPH_PR=$(printf '\xef\x90\x87')       #   U+F407  octicon git-pull-request
-EMDASH=$(printf '\xe2\x80\x94')         # —  U+2014
+# Each bar cell type is a distinct SHAPE (not just a distinct color), so the
+# marker / projection / fill stay legible in mono terminals and colorblind view.
+PIP_FILL='#'     # bar fill            (gradient)
+PIP_EMPTY='-'    # bar track           (muted)
+PIP_MARKER='|'   # clock / threshold   (marker color)
+PIP_PROJ='*'     # burn projection     (yellow)
+PIP_OVERFLOW='!' # projection overflow (bold red)
+SIG_BRANCH='@'   # branch    (evokes git @/HEAD)
+SIG_PR='#'       # pull request
+EMDASH='-'       # ASCII dash
 
 # ── Style primitives ──────────────────────────────────────────────────────
 UNDIM="${ESC}[22m"
@@ -62,6 +66,18 @@ int_prefix() {
 
 # Build an OSC8 hyperlink: osc8 <url> <text>
 osc8() { printf '%s]8;;%s%s%s%s]8;;%s' "$ESC" "$1" "$BEL" "$2" "$ESC" "$BEL"; }
+
+# ── cmux compatibility shim ─────────────────────────────────────────────────
+# The bars and sigils above are already pure ASCII, so the only thing that still
+# garbles under cmux (the libghostty agent multiplexer, which re-emulates the
+# grid and freezes frames into per-tab scrollback) is OSC 8 hyperlinks: a
+# variable-length zero-width payload cmux miscounts, wrapping an unbudgeted row
+# and desyncing the scroll region. Detect cmux via its launch env (CMUX_SURFACE_ID
+# = the render surface, always set; CMUX_BUNDLE_ID as backstop) and emit link
+# text without the escape. Real Ghostty.app sets neither, so links stay clickable.
+if [ -n "${CMUX_SURFACE_ID:-}${CMUX_BUNDLE_ID:-}" ]; then
+  osc8() { printf '%s' "$2"; }
+fi
 
 # Discrete bar width from terminal columns (mirrors pip_count_for_width).
 pip_count_for_width() {
@@ -146,15 +162,15 @@ render_bar() {
     if [ "$i" -lt "$filled" ]; then pip=$PIP_FILL; else pip=$PIP_EMPTY; fi
     if [ "$i" -eq "$marker_idx" ]; then
       if [ "$marker_expired" -eq 1 ]; then
-        out="${out}${UNDIM}${RED}${pip}"
+        out="${out}${UNDIM}${RED}${PIP_MARKER}"
       else
-        out="${out}${UNDIM}${marker_color}${pip}"
+        out="${out}${UNDIM}${marker_color}${PIP_MARKER}"
       fi
     elif [ "$i" -eq "$proj_idx" ]; then
       if [ "$proj_overflow" -eq 1 ]; then
         out="${out}${UNDIM}${BOLD}${RED}${PIP_OVERFLOW}"
       else
-        out="${out}${UNDIM}${PROJ}${pip}"
+        out="${out}${UNDIM}${PROJ}${PIP_PROJ}"
       fi
     elif [ "$i" -lt "$filled" ]; then
       gradient_at $((i * 10000 / (pip_count - 1)))
@@ -221,6 +237,7 @@ fields=$(printf '%s' "$input" | jq -r '
   "cwd=\(.workspace.current_dir // "")",
   "model_name=\(.model.display_name // "")",
   "effort_level=\(.effort.level // "")",
+  "output_style=\(.output_style.name // "")",
   "cost_usd=\(.cost.total_cost_usd // "" | tostring)",
   "duration_ms=\(.cost.total_duration_ms // 0 | tostring)",
   "lines_added=\(.cost.total_lines_added // 0 | tostring)",
@@ -236,7 +253,7 @@ fields=$(printf '%s' "$input" | jq -r '
 ' 2> /dev/null)
 
 used_pct="" worktree_name_input="" project_dir="" cwd_input=""
-model_name="" effort_level="" cost_usd="" duration_ms=0 lines_added=0
+model_name="" effort_level="" output_style="" cost_usd="" duration_ms=0 lines_added=0
 lines_removed=0 pr_number="" pr_state="" exceeds_200k="" five_pct=""
 five_resets_at="" seven_pct="" seven_resets_at="" cols=""
 
@@ -251,6 +268,7 @@ while IFS= read -r _kv || [ -n "$_kv" ]; do
     cwd) cwd_input=$_v ;;
     model_name) model_name=$_v ;;
     effort_level) effort_level=$_v ;;
+    output_style) output_style=$_v ;;
     cost_usd) cost_usd=$_v ;;
     duration_ms) duration_ms=$_v ;;
     lines_added) lines_added=$_v ;;
@@ -358,7 +376,12 @@ if [ -n "$repo_name" ]; then
 else
   id_part="${BOLD}${NEAR_WHITE}${dir_disp}${RST}"
 fi
-line1=$id_part
+# One space after the repo "title"; bracket groups below append flush (no gaps).
+line1="$id_part "
+
+# Worktree name (Claude's payload first, else the git worktree dir basename).
+wt=$worktree_name_input
+[ -z "$wt" ] && wt=$git_worktree_name
 
 if [ "$git_is_repo" -eq 1 ] || [ -n "$branch" ]; then
   b=$branch
@@ -368,26 +391,23 @@ if [ "$git_is_repo" -eq 1 ] || [ -n "$branch" ]; then
   else
     b_disp=$b
   fi
-  line1="${line1} ${MUTED}[${RST}${BLUE}${GLYPH_BRANCH} ${b_disp}${MUTED}]${RST}"
-fi
-
-wt=$worktree_name_input
-[ -z "$wt" ] && wt=$git_worktree_name
-if [ -n "$wt" ]; then
-  line1="${line1} ${MUTED}[${RST}${MAGENTA}${GLYPH_WORKTREE} ${wt}${MUTED}]${RST}"
+  # In a worktree, fold branch + worktree into one cell: @<branch>/<worktree>
+  # (branch stays blue/linked; the /<worktree> suffix keeps worktree-magenta).
+  [ -n "$wt" ] && b_disp="${b_disp}${MAGENTA}/${wt}"
+  line1="${line1}${MUTED}[${BLUE}${BOLD}${SIG_BRANCH}${b_disp}${RST}${MUTED}]${RST}"
 fi
 
 if [ -n "$pr_number" ]; then
   if [ -n "$repo_https" ]; then
-    pr_id=$(osc8 "$repo_https/pull/$pr_number" "${GLYPH_PR} #${pr_number}")
+    pr_id=$(osc8 "$repo_https/pull/$pr_number" "${SIG_PR}${pr_number}")
   else
-    pr_id="${GLYPH_PR} #${pr_number}"
+    pr_id="${SIG_PR}${pr_number}"
   fi
   if [ -z "$pr_state" ]; then
-    line1="${line1} ${MUTED}[${RST}${CYAN}${pr_id}${MUTED}]${RST}"
+    line1="${line1}${MUTED}[${CYAN}${BOLD}${pr_id}${RST}${MUTED}]${RST}"
   else
     pc=$(pr_state_color "$pr_state")
-    line1="${line1} ${MUTED}[${RST}${CYAN}${pr_id}: ${pc}${pr_state}${MUTED}]${RST}"
+    line1="${line1}${MUTED}[${CYAN}${BOLD}${pr_id}${RST}${MUTED}:${pc}${pr_state}${MUTED}]${RST}"
   fi
 fi
 
@@ -403,19 +423,42 @@ plur() { [ "$1" -eq 1 ] && printf '%s' "$2" || printf '%s' "$3"; }
 [ "$staged" -gt 0 ] && add_counter "${GREEN}${staged} staged${RST}"
 [ "$ahead" -gt 0 ] && add_counter "${GREEN}${ahead} ahead${RST}"
 [ "$behind" -gt 0 ] && add_counter "${RED}${behind} behind${RST}"
-[ -n "$counters" ] && line1="${line1} ${MUTED}[C: ${RST}${counters}${MUTED}]${RST}"
+[ -n "$counters" ] && line1="${line1}${MUTED}[${RST}${counters}${MUTED}]${RST}"
 
 if [ "$lines_added" -gt 0 ] || [ "$lines_removed" -gt 0 ]; then
-  line1="${line1} ${MUTED}[${RST}${GREEN}+${lines_added}${MUTED}/${RST}${RED}-${lines_removed}${MUTED}]${RST}"
+  line1="${line1}${MUTED}[${GREEN}${BOLD}+${lines_added}${RST}${MUTED}/${RED}${BOLD}-${lines_removed}${RST}${MUTED}]${RST}"
 fi
 printf '%s\n' "$line1"
 
-# ── Line 2 ──────────────────────────────────────────────────────────────────
+# ── Line 2: model · effort · context flag · output style — distinct colors ───
+# "Opus 4.8 (1M context)" + "high" + "Explanatory" -> [Opus 4.8 High 1M Explanatory]
 line2=""
-[ -n "$model_name" ] && line2="${MUTED}[${RST}${CYAN}M: ${model_name}${MUTED}]${RST}"
-if [ -n "$effort_level" ]; then
-  [ -n "$line2" ] && line2="${line2} "
-  line2="${line2}${MUTED}[${RST}${CYAN}E: ${effort_level}${MUTED}]${RST}"
+if [ -n "$model_name" ] || [ -n "$effort_level" ] || [ -n "$output_style" ]; then
+  model_short="${model_name%% (*}" # short name: drop the " (...)" suffix
+  ctx_flag=""                      # context flag recovered from the parenthetical
+  case "$model_name" in
+    *\(*\)*)
+      ctx_flag="${model_name#*(}"
+      ctx_flag="${ctx_flag%%)*}"
+      ctx_flag="${ctx_flag%% context}" # "1M context" -> "1M"
+      ;;
+  esac
+  effort_cap=""
+  [ -n "$effort_level" ] && effort_cap="$(printf '%s' "${effort_level:0:1}" | tr '[:lower:]' '[:upper:]')${effort_level:1}"
+
+  # Space-separated segments, each its own color, skipping empties.
+  seg=""
+  add_seg() {
+    [ -z "$1" ] && return
+    [ -n "$seg" ] && seg="${seg} "
+    seg="${seg}${2}${1}${RST}"
+  }
+  add_seg "$model_short" "$CYAN"
+  add_seg "$ctx_flag" "$YELLOW"
+  add_seg "$effort_cap" "$GREEN"
+  add_seg "$output_style" "$MAGENTA"
+
+  [ -n "$seg" ] && line2="${MUTED}[${RST}${seg}${MUTED}]${RST}"
 fi
 [ -n "$line2" ] && printf '%s\n' "$line2"
 
@@ -461,20 +504,20 @@ print_window() {
 
   local time_label
   if [ "$remain_min" -ge 1440 ]; then
-    printf -v time_label '%dd %02dh left' "$((remain_min / 1440))" "$(((remain_min % 1440) / 60))"
+    printf -v time_label '%dd %02dh' "$((remain_min / 1440))" "$(((remain_min % 1440) / 60))"
   elif [ "$remain_min" -ge 60 ]; then
-    printf -v time_label '%dh %02dm left' "$((remain_min / 60))" "$((remain_min % 60))"
+    printf -v time_label '%dh %02dm' "$((remain_min / 60))" "$((remain_min % 60))"
   else
-    printf -v time_label '%dm left' "$remain_min"
+    printf -v time_label '%dm' "$remain_min"
   fi
 
   local bar
   bar=$(render_bar "$pct" "$clock_pct" "$proj_pct" "$cols" "$MARKER")
   printf -v lbl '%-3s' "$label"
   printf -v pctf '%3s' "$pct"
-  printf '%s%s%s %s %s%s%%%s [%s%s%s] [%s%s]%s\n' \
+  printf '%s%s%s %s %s%s%%%s %s-%s%s [%s%s]%s\n' \
     "$MUTED" "$lbl" "$RST" "$bar" "$MUTED" "$pctf" "$RST" \
-    "$MARKER" "$time_label" "$MUTED" "$delta_str" "$MUTED" "$RST"
+    "$MARKER" "$time_label" "$RST" "$delta_str" "$MUTED" "$RST"
 }
 print_window "$five_pct" "$five_resets_at" 300 "5h"
 print_window "$seven_pct" "$seven_resets_at" 10080 "7d"
