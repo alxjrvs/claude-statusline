@@ -7,19 +7,22 @@ Targets macOS system bash (3.2) so it's a portable drop-in.
 ## What it shows
 
 ```
- dotFiles [ main] [ #42: approved] [C: 1 untracked, 2 modified] [+42/-7]
-[M: Opus 4.8] [E: medium]
-CTX ▰▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱  63%
-5h  ▰▰▰▰▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱  40% [3h 12m left] [+8%]
-7d  ▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱  22% [5d 06h left] [-3%]
-[$1.23 ($1.23/h)]
+claude-statusline [@main] [#42:approved] [1 untracked, 2 modified] [+42/-7]
+[Opus 4.8 1M High Explanatory]
+CTX ####--------------------|-----  13% 128k/1M cache 78%
+5h  |###########------------------  40% -3h 12m [+8%]
+7d  |#####-------------------------  22% -5d 06h [-3%]
+[$1.23 ($7.38/h) 45% api]
 ```
 
+Pure ASCII (`#` fill, `-` track, `|` clock/threshold, `*` burn projection) — no Nerd Font
+required. Bars size themselves to the terminal via the `COLUMNS` env var.
+
 - **Line 1** — repo (links to GitHub), branch, worktree, PR + review state, git counters (stash/conflict/untracked/modified/staged/ahead/behind), session churn `+added/-removed`.
-- **Line 2** — model and effort level.
-- **Line 3** — context window with a blackbody-gradient bar; an amber cell marks the autocompact threshold, `AC` when crossed, `200k+` past 200k tokens.
+- **Line 2** — model, context-window flag (`1M` for the extended window), reasoning effort, and output style.
+- **Line 3** — context window with a blackbody-gradient bar; an amber cell marks the autocompact threshold, `AC` when crossed, `200k+` past 200k tokens. Trailing `Nk/Nk` is tokens-in-context / window size, and `cache N%` is the share served from the prompt cache.
 - **Lines 4–5** — 5-hour and 7-day rate-limit windows. The blue pip is the wall-clock position in the window; the yellow pip projects end-of-window usage at the current burn rate; `[+N%]` is usage-vs-clock delta.
-- **Line 6** — session cost and $/h burn rate, both read straight from the stdin JSON.
+- **Line 6** — session cost, `$/h` burn rate, and `N% api` (share of wall-clock spent waiting on the API), all read straight from the stdin JSON.
 
 Repo/branch/PR cells are OSC8 hyperlinks — ⌘-click them in a supporting terminal.
 
@@ -29,7 +32,8 @@ counts like `12k`).
 ## Requirements
 
 - `git` and `jq` on `PATH`.
-- A [Nerd Font](https://www.nerdfonts.com/) for the branch/PR glyphs on line 1 (otherwise tofu boxes — everything else is plain Unicode).
+- No special font — output is pure ASCII.
+- Claude Code v2.1.153+ for `COLUMNS`-based bar sizing (older versions fall back to a fixed width).
 - Works with macOS system bash (3.2) and newer.
 
 ## Install
@@ -43,10 +47,15 @@ git clone https://github.com/alxjrvs/claude-statusline ~/Code/claude-statusline
 
 ```json
 {
-  "statusLine":         { "type": "command", "command": "~/.local/bin/claude-statusline" },
+  "statusLine":         { "type": "command", "command": "~/.local/bin/claude-statusline", "refreshInterval": 15 },
   "subagentStatusLine": { "type": "command", "command": "~/.local/bin/claude-subagent-statusline" }
 }
 ```
+
+`refreshInterval` is recommended here: status lines are otherwise event-driven, so the
+time-based cells (the 5h/7d clock pips, `time left`, and the burn projection) would
+freeze while the session sits idle. A 15s timer keeps them live. Omit it to update only
+on events.
 
 ## Notes
 

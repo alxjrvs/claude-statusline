@@ -9,10 +9,10 @@
 # Reads the Claude Code statusline JSON on stdin and emits 3-6 colored lines:
 #   Line 1: repo/dir [@branch(/worktree)][#N:state][counters][+N/-M]
 #   Line 2: [model ctxflag effort style]  e.g. [Opus 4.8 1M High Explanatory]
-#   Line 3: CTX <bar w/ amber autocompact cell> N% AC 200k+
+#   Line 3: CTX <bar w/ amber autocompact cell> N% Nk/Nk cache N% AC 200k+
 #   Line 4: 5h  <bar> N% -Xh Ym [delta]
 #   Line 5: 7d  <bar> N% -Xd Yh [delta]
-#   Line 6: [$cost ($/h)]
+#   Line 6: [$cost ($/h) N% api]
 #
 # Pure ASCII; no Nerd Font required. Everything degrades gracefully: missing
 # fields just drop their segment.
@@ -62,6 +62,18 @@ int_prefix() {
     '' | *[!0-9-]*) echo 0 ;;
     *) echo "$s" ;;
   esac
+}
+
+# Abbreviate a token count: 42 / 12k / 1M (integer math, no decimals).
+abbrev_num() {
+  local n=$1
+  if [ "$n" -lt 1000 ]; then
+    echo "$n"
+  elif [ "$n" -lt 1000000 ]; then
+    echo "$((n / 1000))k"
+  else
+    echo "$((n / 1000000))M"
+  fi
 }
 
 # Build an OSC8 hyperlink: osc8 <url> <text>
@@ -232,14 +244,21 @@ fi
 # are ignored, missing keys keep their default.
 fields=$(printf '%s' "$input" | jq -r '
   "used_pct=\(.context_window.used_percentage // "" | tostring)",
+  "ctx_input_tokens=\(.context_window.total_input_tokens // 0 | tostring)",
+  "ctx_window_size=\(.context_window.context_window_size // 0 | tostring)",
+  "cache_read_tokens=\(.context_window.current_usage.cache_read_input_tokens // 0 | tostring)",
   "worktree_name=\(.worktree.name // "")",
   "project_dir=\(.workspace.project_dir // "")",
   "cwd=\(.workspace.current_dir // "")",
+  "repo_host=\(.workspace.repo.host // "")",
+  "repo_owner=\(.workspace.repo.owner // "")",
+  "repo_name=\(.workspace.repo.name // "")",
   "model_name=\(.model.display_name // "")",
   "effort_level=\(.effort.level // "")",
   "output_style=\(.output_style.name // "")",
   "cost_usd=\(.cost.total_cost_usd // "" | tostring)",
   "duration_ms=\(.cost.total_duration_ms // 0 | tostring)",
+  "api_duration_ms=\(.cost.total_api_duration_ms // 0 | tostring)",
   "lines_added=\(.cost.total_lines_added // 0 | tostring)",
   "lines_removed=\(.cost.total_lines_removed // 0 | tostring)",
   "pr_number=\(.pr.number // "" | tostring)",
@@ -252,8 +271,11 @@ fields=$(printf '%s' "$input" | jq -r '
   "cols=\((.columns // .terminal.columns) // "" | tostring)"
 ' 2> /dev/null)
 
-used_pct="" worktree_name_input="" project_dir="" cwd_input=""
-model_name="" effort_level="" output_style="" cost_usd="" duration_ms=0 lines_added=0
+used_pct="" ctx_input_tokens=0 ctx_window_size=0 cache_read_tokens=0
+worktree_name_input="" project_dir="" cwd_input=""
+repo_host="" repo_owner="" repo_name_input=""
+model_name="" effort_level="" output_style="" cost_usd="" duration_ms=0
+api_duration_ms=0 lines_added=0
 lines_removed=0 pr_number="" pr_state="" exceeds_200k="" five_pct=""
 five_resets_at="" seven_pct="" seven_resets_at="" cols=""
 
@@ -263,14 +285,21 @@ while IFS= read -r _kv || [ -n "$_kv" ]; do
   _v=${_kv#*=}
   case "$_k" in
     used_pct) used_pct=$_v ;;
+    ctx_input_tokens) ctx_input_tokens=$_v ;;
+    ctx_window_size) ctx_window_size=$_v ;;
+    cache_read_tokens) cache_read_tokens=$_v ;;
     worktree_name) worktree_name_input=$_v ;;
     project_dir) project_dir=$_v ;;
     cwd) cwd_input=$_v ;;
+    repo_host) repo_host=$_v ;;
+    repo_owner) repo_owner=$_v ;;
+    repo_name) repo_name_input=$_v ;;
     model_name) model_name=$_v ;;
     effort_level) effort_level=$_v ;;
     output_style) output_style=$_v ;;
     cost_usd) cost_usd=$_v ;;
     duration_ms) duration_ms=$_v ;;
+    api_duration_ms) api_duration_ms=$_v ;;
     lines_added) lines_added=$_v ;;
     lines_removed) lines_removed=$_v ;;
     pr_number) pr_number=$_v ;;
@@ -286,8 +315,17 @@ done <<< "$fields"
 
 # Normalize numeric-ish fields.
 duration_ms=$(int_prefix "$duration_ms")
+api_duration_ms=$(int_prefix "$api_duration_ms")
 lines_added=$(int_prefix "$lines_added")
 lines_removed=$(int_prefix "$lines_removed")
+ctx_input_tokens=$(int_prefix "$ctx_input_tokens")
+ctx_window_size=$(int_prefix "$ctx_window_size")
+cache_read_tokens=$(int_prefix "$cache_read_tokens")
+
+# Terminal width: as of Claude Code v2.1.153 it arrives via the COLUMNS env var
+# (statusline stdout is captured, so `tput cols` can't see the tty). Prefer that;
+# fall back to any JSON-provided width, then to the fixed default in render_bar.
+[ -n "${COLUMNS:-}" ] && cols=$COLUMNS
 case "$cols" in '' | *[!0-9]*) cols="" ;; esac
 
 # ── Gather git state (self-contained; deliberately not the git-data cache) ──
@@ -340,12 +378,19 @@ if topl=$(git rev-parse --show-toplevel 2> /dev/null) && [ -n "$topl" ]; then
     branch=$(git rev-parse --short HEAD 2> /dev/null)
   fi
 
-  # Remote URL → HTTPS + repo name.
-  remote=$(git remote get-url origin 2> /dev/null)
-  if [ -n "$remote" ]; then
-    repo_https=${remote/git@github.com:/https:\/\/github.com\/}
-    repo_https=${repo_https%.git}
-    repo_name=$(basename "$repo_https")
+  # Remote identity → HTTPS + repo name. Prefer Claude Code's structured
+  # workspace.repo payload (correct for any host, and saves a git subprocess);
+  # fall back to parsing the origin remote ourselves when it's absent.
+  if [ -n "$repo_owner" ] && [ -n "$repo_name_input" ]; then
+    repo_https="https://${repo_host:-github.com}/${repo_owner}/${repo_name_input}"
+    repo_name=$repo_name_input
+  else
+    remote=$(git remote get-url origin 2> /dev/null)
+    if [ -n "$remote" ]; then
+      repo_https=${remote/git@github.com:/https:\/\/github.com\/}
+      repo_https=${repo_https%.git}
+      repo_name=$(basename "$repo_https")
+    fi
   fi
 
   stash=$(git stash list 2> /dev/null | grep -c .)
@@ -435,14 +480,23 @@ printf '%s\n' "$line1"
 line2=""
 if [ -n "$model_name" ] || [ -n "$effort_level" ] || [ -n "$output_style" ]; then
   model_short="${model_name%% (*}" # short name: drop the " (...)" suffix
-  ctx_flag=""                      # context flag recovered from the parenthetical
-  case "$model_name" in
-    *\(*\)*)
-      ctx_flag="${model_name#*(}"
-      ctx_flag="${ctx_flag%%)*}"
-      ctx_flag="${ctx_flag%% context}" # "1M context" -> "1M"
-      ;;
-  esac
+  # Context flag: prefer the authoritative context_window_size (1M for the
+  # extended window; nothing for the 200k default). Fall back to the model-name
+  # parenthetical only when the size field is absent (older Claude Code).
+  ctx_flag=""
+  if [ "$ctx_window_size" -ge 1000000 ]; then
+    ctx_flag="1M"
+  elif [ "$ctx_window_size" -gt 200000 ]; then
+    ctx_flag="$(abbrev_num "$ctx_window_size")"
+  elif [ "$ctx_window_size" -eq 0 ]; then
+    case "$model_name" in
+      *\(*\)*)
+        ctx_flag="${model_name#*(}"
+        ctx_flag="${ctx_flag%%)*}"
+        ctx_flag="${ctx_flag%% context}" # "1M context" -> "1M"
+        ;;
+    esac
+  fi
   effort_cap=""
   [ -n "$effort_level" ] && effort_cap="$(printf '%s' "${effort_level:0:1}" | tr '[:lower:]' '[:upper:]')${effort_level:1}"
 
@@ -465,12 +519,30 @@ fi
 # ── Line 3: CTX bar ─────────────────────────────────────────────────────────
 used_int=$(int_prefix "$used_pct")
 ctx_bar=$(render_bar "$used_int" "$ac" "" "$cols" "$AUTOCOMPACT")
+
+# Absolute token readout + cache-hit ratio (both from the live context_window).
+# used_percentage is input-only, so this adds the raw figure and how much of the
+# context is being served from the prompt cache — a session-efficiency signal.
+ctx_detail=""
+if [ "$ctx_input_tokens" -gt 0 ]; then
+  if [ "$ctx_window_size" -gt 0 ]; then
+    ctx_detail=" ${MUTED}$(abbrev_num "$ctx_input_tokens")/$(abbrev_num "$ctx_window_size")${RST}"
+  else
+    ctx_detail=" ${MUTED}$(abbrev_num "$ctx_input_tokens")${RST}"
+  fi
+  if [ "$cache_read_tokens" -gt 0 ]; then
+    cache_pct=$((cache_read_tokens * 100 / ctx_input_tokens))
+    [ "$cache_pct" -gt 100 ] && cache_pct=100
+    ctx_detail="${ctx_detail} ${MUTED}cache ${cache_pct}%${RST}"
+  fi
+fi
+
 ctx_warn=""
 [ "$used_int" -ge "$ac" ] && ctx_warn=" ${AUTOCOMPACT}AC${RST}"
 [ -n "$exceeds_200k" ] && ctx_warn="${ctx_warn} ${BOLD}${RED}200k+${RST}"
 printf -v ctx_lbl '%-3s' "CTX"
 printf -v ctx_pct '%3s' "$used_int"
-printf '%s%s%s %s %s%s%%%s%s\n' "$MUTED" "$ctx_lbl" "$RST" "$ctx_bar" "$MUTED" "$ctx_pct" "$RST" "$ctx_warn"
+printf '%s%s%s %s %s%s%%%s%s%s\n' "$MUTED" "$ctx_lbl" "$RST" "$ctx_bar" "$MUTED" "$ctx_pct" "$RST" "$ctx_detail" "$ctx_warn"
 
 # ── Lines 4-5: rate-limit windows ───────────────────────────────────────────
 print_window() {
@@ -530,5 +602,12 @@ if [ -n "$cost_display" ]; then
     if (c ~ /^[0-9]+(\.[0-9]+)?$/ && c+0 > 0 && d+0 >= 60000)
       printf "$%.2f/h", (c+0) / ((d+0)/3600000.0) }')
   [ -n "$burn" ] && money="${money} (${burn})"
-  printf '%s[%s%s%s%s]%s\n' "$MUTED" "$RST" "$GREEN" "$money" "$MUTED" "$RST"
+  # Share of wall-clock spent waiting on the API vs. local/idle time.
+  api_str=""
+  if [ "$duration_ms" -ge 60000 ] && [ "$api_duration_ms" -gt 0 ]; then
+    api_pct=$((api_duration_ms * 100 / duration_ms))
+    [ "$api_pct" -gt 100 ] && api_pct=100
+    api_str=" ${MUTED}${api_pct}% api${RST}"
+  fi
+  printf '%s[%s%s%s%s%s%s]%s\n' "$MUTED" "$RST" "$GREEN" "$money" "$RST" "$api_str" "$MUTED" "$RST"
 fi
