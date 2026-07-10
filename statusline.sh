@@ -323,9 +323,13 @@ ctx_window_size=$(int_prefix "$ctx_window_size")
 cache_read_tokens=$(int_prefix "$cache_read_tokens")
 
 # Terminal width: as of Claude Code v2.1.153 it arrives via the COLUMNS env var
-# (statusline stdout is captured, so `tput cols` can't see the tty). Prefer that;
-# fall back to any JSON-provided width, then to the fixed default in render_bar.
-[ -n "${COLUMNS:-}" ] && cols=$COLUMNS
+# (statusline stdout is captured, so `tput cols` can't see the tty). Prefer a
+# numeric COLUMNS; a set-but-non-numeric value falls through to any JSON-provided
+# width rather than clobbering it, then to the fixed default in render_bar.
+case "${COLUMNS:-}" in
+  '' | *[!0-9]*) : ;;
+  *) cols=$COLUMNS ;;
+esac
 case "$cols" in '' | *[!0-9]*) cols="" ;; esac
 
 # ── Gather git state (self-contained; deliberately not the git-data cache) ──
@@ -381,8 +385,8 @@ if topl=$(git rev-parse --show-toplevel 2> /dev/null) && [ -n "$topl" ]; then
   # Remote identity → HTTPS + repo name. Prefer Claude Code's structured
   # workspace.repo payload (correct for any host, and saves a git subprocess);
   # fall back to parsing the origin remote ourselves when it's absent.
-  if [ -n "$repo_owner" ] && [ -n "$repo_name_input" ]; then
-    repo_https="https://${repo_host:-github.com}/${repo_owner}/${repo_name_input}"
+  if [ -n "$repo_host" ] && [ -n "$repo_owner" ] && [ -n "$repo_name_input" ]; then
+    repo_https="https://${repo_host}/${repo_owner}/${repo_name_input}"
     repo_name=$repo_name_input
   else
     remote=$(git remote get-url origin 2> /dev/null)
@@ -480,15 +484,16 @@ printf '%s\n' "$line1"
 line2=""
 if [ -n "$model_name" ] || [ -n "$effort_level" ] || [ -n "$output_style" ]; then
   model_short="${model_name%% (*}" # short name: drop the " (...)" suffix
-  # Context flag: prefer the authoritative context_window_size (1M for the
-  # extended window; nothing for the 200k default). Fall back to the model-name
-  # parenthetical only when the size field is absent (older Claude Code).
+  # Context flag: prefer the authoritative context_window_size — anything past
+  # the 200k default becomes a flag (abbrev_num(1000000) -> "1M"). Fall back to
+  # the model-name parenthetical whenever the size field yields no flag (absent,
+  # or a build that reports the default size while the 1M beta is active), so the
+  # extended-window indicator is never silently dropped.
   ctx_flag=""
-  if [ "$ctx_window_size" -ge 1000000 ]; then
-    ctx_flag="1M"
-  elif [ "$ctx_window_size" -gt 200000 ]; then
+  if [ "$ctx_window_size" -gt 200000 ]; then
     ctx_flag="$(abbrev_num "$ctx_window_size")"
-  elif [ "$ctx_window_size" -eq 0 ]; then
+  fi
+  if [ -z "$ctx_flag" ]; then
     case "$model_name" in
       *\(*\)*)
         ctx_flag="${model_name#*(}"
