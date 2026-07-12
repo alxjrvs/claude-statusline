@@ -62,7 +62,6 @@ DEFAULT_PIP_COUNT=30 # fallback when the terminal width is unknown
 # aligned; the CTX line's smaller overhead just leaves a little trailing slack.
 BAR_RESERVE=28
 MIN_PIP_COUNT=12  # keep the bar readable on a narrow pane (and >1 for the gradient divisor)
-MAX_PIP_COUNT=120 # sane ceiling on an ultrawide monitor
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -102,8 +101,8 @@ if [ -n "${CMUX_SURFACE_ID:-}${CMUX_BUNDLE_ID:-}" ]; then
   osc8() { printf '%s' "$2"; }
 fi
 
-# Bar width from terminal columns: fill the row, reserving BAR_RESERVE cols for
-# the fixed text, clamped to [MIN_PIP_COUNT, MAX_PIP_COUNT].
+# Bar width from terminal columns: fill the row edge-to-edge, reserving
+# BAR_RESERVE cols for the fixed text, with a MIN_PIP_COUNT floor (no ceiling).
 pip_count_for_width() {
   local c=$1
   if [ -z "$c" ]; then
@@ -112,7 +111,6 @@ pip_count_for_width() {
   fi
   local n=$((c - BAR_RESERVE))
   [ "$n" -lt "$MIN_PIP_COUNT" ] && n=$MIN_PIP_COUNT
-  [ "$n" -gt "$MAX_PIP_COUNT" ] && n=$MAX_PIP_COUNT
   echo "$n"
 }
 
