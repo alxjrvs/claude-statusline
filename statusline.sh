@@ -51,7 +51,18 @@ MARKER="${ESC}[38;2;96;200;255m"     # rate-window clock pip (blue)
 PROJ="${ESC}[38;2;255;210;80m"       # burn projection pip (yellow)
 AUTOCOMPACT="${ESC}[38;2;255;128;0m" # autocompact threshold cell (amber)
 
-DEFAULT_PIP_COUNT=30
+DEFAULT_PIP_COUNT=30 # fallback when the terminal width is unknown
+
+# Bars stretch to fill the row: pip_count = cols - BAR_RESERVE, so on a wide
+# terminal the bar uses all the space the fixed text leaves free. BAR_RESERVE is
+# the widest fixed overhead across all bar lines (the 5h/7d window line):
+#   label(3) + space + space + pct(3) + '%' + space + '-' + time(<=6) + space +
+#   '[' + delta(<=5) + ']'  ~= 25 visible cols, +3 safety margin.
+# All bars share one pip_count (driven by the same cols) so they stay vertically
+# aligned; the CTX line's smaller overhead just leaves a little trailing slack.
+BAR_RESERVE=28
+MIN_PIP_COUNT=12  # keep the bar readable on a narrow pane (and >1 for the gradient divisor)
+MAX_PIP_COUNT=120 # sane ceiling on an ultrawide monitor
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -91,22 +102,18 @@ if [ -n "${CMUX_SURFACE_ID:-}${CMUX_BUNDLE_ID:-}" ]; then
   osc8() { printf '%s' "$2"; }
 fi
 
-# Discrete bar width from terminal columns (mirrors pip_count_for_width).
+# Bar width from terminal columns: fill the row, reserving BAR_RESERVE cols for
+# the fixed text, clamped to [MIN_PIP_COUNT, MAX_PIP_COUNT].
 pip_count_for_width() {
   local c=$1
   if [ -z "$c" ]; then
     echo "$DEFAULT_PIP_COUNT"
     return
   fi
-  if [ "$c" -lt 60 ]; then
-    echo 15
-  elif [ "$c" -lt 90 ]; then
-    echo 20
-  elif [ "$c" -lt 120 ]; then
-    echo 30
-  elif [ "$c" -lt 160 ]; then
-    echo 40
-  else echo 50; fi
+  local n=$((c - BAR_RESERVE))
+  [ "$n" -lt "$MIN_PIP_COUNT" ] && n=$MIN_PIP_COUNT
+  [ "$n" -gt "$MAX_PIP_COUNT" ] && n=$MAX_PIP_COUNT
+  echo "$n"
 }
 
 # Blackbody-style gradient at t (0..10000); sets globals _GR/_GG/_GB.
