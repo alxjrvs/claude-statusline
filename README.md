@@ -7,23 +7,30 @@ Targets macOS system bash (3.2) so it's a portable drop-in.
 ## What it shows
 
 ```
-claude-statusline [@main] [#42:approved] [1 untracked, 2 modified] [+42/-7]
-[Opus 4.8 1M High Explanatory] $1.23 ($7.38/h)
+claude-statusline [reviewer][@main/wt][?1 !2 +3][+42/-7][Opus 4.8 1M High Explanatory][N][$1.23 ($7.38/h)]
 CTX ####--------------------|-----  13% 128k/1M cache 78% 67%->AC
 5h  |###########------------------  40% 3h 12m left [+8%] 7d 22%
 ```
 
 Pure ASCII (`#` fill, `-` track, `|` clock/threshold, `*` burn projection) — no Nerd Font
 required. Bars size themselves to the terminal via the `COLUMNS` env var, holding back a
-small margin so they never overrun Claude's own chrome. The layout stays compact: 3–5
-lines, with cost folded onto the model line and the 7-day window shown only when it's the
-binding one.
+small margin so they never overrun Claude's own chrome. The layout stays compact: **2–4
+lines** — identity and config share one row of colored `[]` groups, and the 7-day window
+shows only when it's the binding one.
 
-- **Line 1** — repo (links to GitHub), branch, worktree, git counters (stash/conflict/untracked/modified/staged/ahead/behind), session churn `+added/-removed`. Long branch/worktree names are middle-ellipsized (`feature/some-l..name-here`) to a width budget; if the groups still don't fit the pane, line 1 wraps the overflow onto continuation lines rather than running off the right edge. (No PR cell — Claude Code already surfaces the current PR.)
-- **Line 2** — model, context-window flag (`1M` for the extended window), reasoning effort, output style, and session cost + `$/h` burn rate.
-- **Line 3** — context window with a blackbody-gradient bar; an amber cell marks the autocompact threshold. The `%` escalates green→amber→red as it approaches; below the threshold a `N%->AC` badge shows live headroom, and once crossed a `[AC]` chip (plus `[200k+]` past 200k tokens). Trailing `Nk/Nk` is tokens-in-context / window size, and `cache N%` is the share served from the prompt cache.
-- **Line 4** — the 5-hour rate-limit window. The blue pip is the wall-clock position in the window; the yellow pip projects end-of-window usage at the current burn rate; `time left` counts down to the reset; `[+N%]` is usage-vs-clock delta. When the 7-day window isn't binding it rides here as a compact `7d N%` badge.
-- **Line 5** — the 7-day window, shown as its own bar only when it's ≥50% or busier than the 5-hour window.
+- **Line 1** — one packed row of colored `[]` groups that wrap to a continuation line only when they won't fit the pane:
+  - **`[name]`** — session/agent name for orienting among many concurrent tabs: `agent.name` (a spawned/`--agent` context, magenta) wins over your `session_name` (cyan) when both are set.
+  - **`[@branch/worktree]`** — repo (title, links to GitHub), branch (links to the tree), and worktree. Long branch/worktree names are middle-ellipsized (`feature/some-l..name-here`) to a width budget.
+  - **`[counters]`** — git state as colored ASCII sigils, space-separated: `*`stash `x`conflict `?`untracked `!`modified `+`staged `^`ahead `v`behind (e.g. `[?1 !2 +3]`).
+  - **`[+added/-removed]`** — session churn.
+  - **`[model 1M effort style]`** — model, context-window flag (`1M` for the extended window), reasoning effort (`XHi`/`Max` for the high tiers), output style.
+  - **`[N]`** — vim mode (`N`/`I`/`V`/`V-L`), colored by mode; shown only when vim mode is on.
+  - **`[$cost ($/h)]`** — session cost + per-hour burn.
+
+  (No PR cell — Claude Code already surfaces the current PR.)
+- **Line 2** — context window with a blackbody-gradient bar; an amber cell marks the autocompact threshold. The `%` escalates green→amber→red as it approaches; below the threshold a `N%->AC` badge shows live headroom, and once crossed a `[AC]` chip (plus `[200k+]` past 200k tokens). Trailing `Nk/Nk` is tokens-in-context / window size, and `cache N%` is the share served from the prompt cache.
+- **Line 3** — the 5-hour rate-limit window. The blue pip is the wall-clock position in the window; the yellow pip projects end-of-window usage at the current burn rate; `time left` counts down to the reset; `[+N%]` is usage-vs-clock delta. When the 7-day window isn't binding it rides here as a compact `7d N%` badge.
+- **Line 4** — the 7-day window, shown as its own bar only when it's ≥50% or busier than the 5-hour window.
 
 Repo and branch cells are OSC8 hyperlinks — ⌘-click them in a supporting terminal.
 

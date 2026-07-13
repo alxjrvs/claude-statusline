@@ -6,13 +6,16 @@
 #
 #   "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" }
 #
-# Reads the Claude Code statusline JSON on stdin and emits 3-5 colored lines:
-#   Line 1: repo/dir [@branch(/worktree)][counters][+N/-M]  (wraps if it won't
-#           fit the pane; no PR chip — Claude Code already surfaces the PR)
-#   Line 2: [model ctxflag effort style] $cost ($/h)
-#   Line 3: CTX <bar w/ amber autocompact cell> N% Nk/Nk cache N% N%->AC [200k+]
-#   Line 4: 5h  <bar> N% Xh Ym left [delta]   (+ inline "7d N%" when 7d hidden)
-#   Line 5: 7d  <bar> N% Xd Yh left [delta]   (shown only when 7d is binding)
+# Reads the Claude Code statusline JSON on stdin and emits 2-4 colored lines:
+#   Line 1: repo/dir [name][@branch(/wt)][counters][+N/-M][model ctx eff style][vim][$cost]
+#           — identity + config folded onto one row of colored [] groups that
+#           pack left-to-right and wrap to a continuation line only when they
+#           won't fit the pane. No PR chip — Claude Code surfaces the PR. Git
+#           counters are colored ASCII sigils, space-separated inside the []:
+#           *stash  x conflict  ? untracked  ! modified  + staged  ^ ahead  v behind
+#   Line 2: CTX <bar w/ amber autocompact cell> N% Nk/Nk cache N% N%->AC [200k+]
+#   Line 3: 5h  <bar> N% Xh Ym left [delta]   (+ inline "7d N%" when 7d hidden)
+#   Line 4: 7d  <bar> N% Xd Yh left [delta]   (shown only when 7d is binding)
 #
 # Pure ASCII; no Nerd Font required. Colors honor NO_COLOR and degrade on
 # non-truecolor terminals. Everything degrades gracefully: missing fields just
@@ -330,6 +333,9 @@ fields=$(printf '%s' "$input" | jq -r '
   "model_name=\(.model.display_name // "")",
   "effort_level=\(.effort.level // "")",
   "output_style=\(.output_style.name // "")",
+  "session_name=\(.session_name // "")",
+  "agent_name=\(.agent.name // "")",
+  "vim_mode=\(.vim.mode // "")",
   "cost_usd=\(.cost.total_cost_usd // "" | tostring)",
   "duration_ms=\(.cost.total_duration_ms // 0 | tostring)",
   "lines_added=\(.cost.total_lines_added // 0 | tostring)",
@@ -346,6 +352,7 @@ used_pct="" ctx_input_tokens=0 ctx_window_size=0 cache_read_tokens=0
 worktree_name_input="" project_dir="" cwd_input=""
 repo_host="" repo_owner="" repo_name_input=""
 model_name="" effort_level="" output_style="" cost_usd="" duration_ms=0
+session_name="" agent_name="" vim_mode=""
 lines_added=0
 lines_removed=0 exceeds_200k="" five_pct=""
 five_resets_at="" seven_pct="" seven_resets_at="" cols=""
@@ -368,6 +375,9 @@ while IFS= read -r _kv || [ -n "$_kv" ]; do
     model_name) model_name=$_v ;;
     effort_level) effort_level=$_v ;;
     output_style) output_style=$_v ;;
+    session_name) session_name=$_v ;;
+    agent_name) agent_name=$_v ;;
+    vim_mode) vim_mode=$_v ;;
     cost_usd) cost_usd=$_v ;;
     duration_ms) duration_ms=$_v ;;
     lines_added) lines_added=$_v ;;
@@ -511,7 +521,12 @@ else
   wt_max=24
 fi
 
-# ── Line 1 (hard-bounded; wraps to continuation lines when it won't fit) ─────
+# ── Line 1 (identity + config, packed onto one row; wraps when it won't fit) ─
+# Everything Claude Code reports about "where am I / how am I configured" folds
+# onto a single row of colored [] groups: session/agent name, branch(/worktree),
+# git counters, session churn, model+ctx+effort+style, vim mode, cost. The groups
+# pack left-to-right and spill to a continuation line only when they exceed the
+# pane, so the common case is one row (a row saved vs. the old title+model split).
 # Title: repo name (linked) or the cwd's last two components, truncated to the
 # pane so an enormous name can't overflow on its own.
 if [ -n "$repo_name" ]; then title_txt=$repo_name; else title_txt=$dir_disp; fi
@@ -527,6 +542,21 @@ fi
 # ANSI/OSC8 noise in the display string.
 seg_disp=() seg_len=()
 add_seg() { seg_disp[${#seg_disp[@]}]=$1; seg_len[${#seg_len[@]}]=$2; }
+
+# Name group: [agent] or [session] — the "which of my many concurrent sessions
+# is this?" orientation cell. agent.name (a spawned/--agent context) wins over
+# the user's session_name when both are set: magenta for an agent, cyan for a
+# named session. Truncated to the branch budget so a long name can't blow the row.
+name_txt="" name_col=""
+if [ -n "$agent_name" ]; then
+  name_txt=$agent_name name_col=$MAGENTA
+elif [ -n "$session_name" ]; then
+  name_txt=$session_name name_col=$CYAN
+fi
+if [ -n "$name_txt" ]; then
+  nt=$(trunc_mid "$name_txt" "$branch_max")
+  add_seg "${MUTED}[${name_col}${BOLD}${nt}${RST}${MUTED}]${RST}" $((2 + ${#nt}))
+fi
 
 # Worktree name (Claude's payload first, else the git worktree dir basename).
 wt=$worktree_name_input
@@ -552,23 +582,26 @@ if [ "$git_is_repo" -eq 1 ] || [ -n "$branch" ]; then
   add_seg "${MUTED}[${BLUE}${BOLD}${SIG_BRANCH}${b_disp}${RST}${MUTED}]${RST}" "$glen"
 fi
 
-# Counters group: [stash, conflict, untracked, modified, staged, ahead, behind].
+# Counters group: colored ASCII sigils, space-separated inside one []. Same
+# colors as the old word form (untracked cyan, modified yellow, staged green,
+# conflict bold-red, stash magenta, ahead green, behind red); the glyph + count
+# is ~4x denser than "N untracked, N modified, …". Sigils:
+#   *stash  x conflict  ? untracked  ! modified  + staged  ^ ahead  v behind
 counters="" counters_plain=""
 add_counter() {
   if [ -z "$counters" ]; then
     counters=$1 counters_plain=$2
   else
-    counters="${counters}${MUTED}, ${RST}$1" counters_plain="${counters_plain}, $2"
+    counters="${counters} $1" counters_plain="${counters_plain} $2"
   fi
 }
-plur() { [ "$1" -eq 1 ] && printf '%s' "$2" || printf '%s' "$3"; }
-[ "$stash" -gt 0 ] && { w=$(plur "$stash" stash stashes); add_counter "${MAGENTA}${stash} ${w}${RST}" "${stash} ${w}"; }
-[ "$conflict" -gt 0 ] && { w=$(plur "$conflict" conflict conflicts); add_counter "${BOLD}${RED}${conflict} ${w}${RST}" "${conflict} ${w}"; }
-[ "$untracked" -gt 0 ] && add_counter "${CYAN}${untracked} untracked${RST}" "${untracked} untracked"
-[ "$unstaged" -gt 0 ] && add_counter "${YELLOW}${unstaged} modified${RST}" "${unstaged} modified"
-[ "$staged" -gt 0 ] && add_counter "${GREEN}${staged} staged${RST}" "${staged} staged"
-[ "$ahead" -gt 0 ] && add_counter "${GREEN}${ahead} ahead${RST}" "${ahead} ahead"
-[ "$behind" -gt 0 ] && add_counter "${RED}${behind} behind${RST}" "${behind} behind"
+[ "$stash" -gt 0 ]     && add_counter "${MAGENTA}*${stash}${RST}"       "*${stash}"
+[ "$conflict" -gt 0 ]  && add_counter "${BOLD}${RED}x${conflict}${RST}" "x${conflict}"
+[ "$untracked" -gt 0 ] && add_counter "${CYAN}?${untracked}${RST}"      "?${untracked}"
+[ "$unstaged" -gt 0 ]  && add_counter "${YELLOW}!${unstaged}${RST}"     "!${unstaged}"
+[ "$staged" -gt 0 ]    && add_counter "${GREEN}+${staged}${RST}"        "+${staged}"
+[ "$ahead" -gt 0 ]     && add_counter "${GREEN}^${ahead}${RST}"         "^${ahead}"
+[ "$behind" -gt 0 ]    && add_counter "${RED}v${behind}${RST}"          "v${behind}"
 [ -n "$counters" ] && add_seg "${MUTED}[${RST}${counters}${MUTED}]${RST}" $((2 + ${#counters_plain}))
 
 # Lines-changed group: [+added/-removed].
@@ -576,6 +609,76 @@ if [ "$lines_added" -gt 0 ] || [ "$lines_removed" -gt 0 ]; then
   lc_plain="+${lines_added}/-${lines_removed}"
   add_seg "${MUTED}[${GREEN}${BOLD}+${lines_added}${RST}${MUTED}/${RED}${BOLD}-${lines_removed}${RST}${MUTED}]${RST}" $((2 + ${#lc_plain}))
 fi
+
+# ── Config groups (folded onto the same row as identity) ─────────────────────
+# Cost: total + per-hour burn from one awk pass (burn needs >=1min of duration).
+money=$(awk -v c="$cost_usd" -v d="$duration_ms" 'BEGIN{
+  if (c ~ /^[0-9]+(\.[0-9]+)?$/) {
+    printf "$%.2f", c
+    if (c+0 > 0 && d+0 >= 60000) printf " ($%.2f/h)", (c+0) / ((d+0)/3600000.0)
+  }
+}')
+
+# Model group: [model ctxflag effort style], each sub-segment its own color.
+if [ -n "$model_name" ] || [ -n "$effort_level" ] || [ -n "$output_style" ]; then
+  model_short="${model_name%% (*}" # short name: drop the " (...)" suffix
+  # Context flag: prefer the authoritative context_window_size — anything past
+  # the 200k default becomes a flag (abbrev_num(1000000) -> "1M"). Fall back to
+  # the model-name parenthetical whenever the size field yields no flag (absent,
+  # or a build that reports the default size while the 1M beta is active), so the
+  # extended-window indicator is never silently dropped.
+  ctx_flag=""
+  if [ "$ctx_window_size" -gt 200000 ]; then
+    ctx_flag="$(abbrev_num "$ctx_window_size")"
+  fi
+  if [ -z "$ctx_flag" ]; then
+    case "$model_name" in
+      *\(*\)*)
+        ctx_flag="${model_name#*(}"
+        ctx_flag="${ctx_flag%%)*}"
+        ctx_flag="${ctx_flag%% context}" # "1M context" -> "1M"
+        ;;
+    esac
+  fi
+  # Effort: title-case the first letter, but the multi-char tiers read wrong that
+  # way ("Xhigh"/"Max"), so map those to compact labels.
+  case "$effort_level" in
+    "") effort_cap="" ;;
+    xhigh) effort_cap="XHi" ;;
+    max) effort_cap="Max" ;;
+    *) effort_cap="$(printf '%s' "${effort_level:0:1}" | tr '[:lower:]' '[:upper:]')${effort_level:1}" ;;
+  esac
+
+  # Assemble the group's colored display + a plain twin for the packer's width.
+  mseg="" mseg_plain=""
+  madd() {
+    [ -z "$1" ] && return
+    if [ -n "$mseg" ]; then mseg="${mseg} " mseg_plain="${mseg_plain} "; fi
+    mseg="${mseg}${2}${1}${RST}" mseg_plain="${mseg_plain}${1}"
+  }
+  madd "$model_short" "$CYAN"
+  madd "$ctx_flag" "$YELLOW"
+  madd "$effort_cap" "$GREEN"
+  madd "$output_style" "$MAGENTA"
+  [ -n "$mseg" ] && add_seg "${MUTED}[${RST}${mseg}${MUTED}]${RST}" $((2 + ${#mseg_plain}))
+fi
+
+# Vim-mode chip: [N]/[I]/[V]/[V-L] colored by mode (the vim-statusline idiom).
+if [ -n "$vim_mode" ]; then
+  case "$vim_mode" in
+    NORMAL) vm=N vm_col=$BLUE ;;
+    INSERT) vm=I vm_col=$GREEN ;;
+    VISUAL) vm=V vm_col=$MAGENTA ;;
+    "VISUAL LINE") vm=V-L vm_col=$MAGENTA ;;
+    "VISUAL BLOCK") vm=V-B vm_col=$MAGENTA ;;
+    REPLACE) vm=R vm_col=$RED ;;
+    *) vm=${vim_mode:0:1} vm_col=$MUTED ;;
+  esac
+  add_seg "${MUTED}[${vm_col}${BOLD}${vm}${RST}${MUTED}]${RST}" $((2 + ${#vm}))
+fi
+
+# Cost group: [$total ($/h)] in green.
+[ -n "$money" ] && add_seg "${MUTED}[${GREEN}${money}${RST}${MUTED}]${RST}" $((2 + ${#money}))
 
 # Pack the groups onto lines: the title starts line 1; each group joins the
 # current line when it still fits within `cols`, otherwise it starts a fresh
@@ -600,67 +703,7 @@ while [ "$i" -lt "$nseg" ]; do
 done
 printf '%s\n' "$cur_disp"
 
-# ── Line 2: model · ctx flag · effort · style · cost — distinct colors ───────
-# "Opus 4.8 (1M context)" + "high" + "Explanatory" + $cost ->
-#   [Opus 4.8 1M High Explanatory] $1.23 ($7.38/h)
-# Cost is folded onto this line (rather than its own row) to keep the statusline
-# short; a single awk pass formats the total and the per-hour burn.
-money=$(awk -v c="$cost_usd" -v d="$duration_ms" 'BEGIN{
-  if (c ~ /^[0-9]+(\.[0-9]+)?$/) {
-    printf "$%.2f", c
-    if (c+0 > 0 && d+0 >= 60000) printf " ($%.2f/h)", (c+0) / ((d+0)/3600000.0)
-  }
-}')
-
-line2=""
-if [ -n "$model_name" ] || [ -n "$effort_level" ] || [ -n "$output_style" ]; then
-  model_short="${model_name%% (*}" # short name: drop the " (...)" suffix
-  # Context flag: prefer the authoritative context_window_size — anything past
-  # the 200k default becomes a flag (abbrev_num(1000000) -> "1M"). Fall back to
-  # the model-name parenthetical whenever the size field yields no flag (absent,
-  # or a build that reports the default size while the 1M beta is active), so the
-  # extended-window indicator is never silently dropped.
-  ctx_flag=""
-  if [ "$ctx_window_size" -gt 200000 ]; then
-    ctx_flag="$(abbrev_num "$ctx_window_size")"
-  fi
-  if [ -z "$ctx_flag" ]; then
-    case "$model_name" in
-      *\(*\)*)
-        ctx_flag="${model_name#*(}"
-        ctx_flag="${ctx_flag%%)*}"
-        ctx_flag="${ctx_flag%% context}" # "1M context" -> "1M"
-        ;;
-    esac
-  fi
-  effort_cap=""
-  [ -n "$effort_level" ] && effort_cap="$(printf '%s' "${effort_level:0:1}" | tr '[:lower:]' '[:upper:]')${effort_level:1}"
-
-  # Space-separated segments, each its own color, skipping empties.
-  seg=""
-  add_seg() {
-    [ -z "$1" ] && return
-    [ -n "$seg" ] && seg="${seg} "
-    seg="${seg}${2}${1}${RST}"
-  }
-  add_seg "$model_short" "$CYAN"
-  add_seg "$ctx_flag" "$YELLOW"
-  add_seg "$effort_cap" "$GREEN"
-  add_seg "$output_style" "$MAGENTA"
-
-  [ -n "$seg" ] && line2="${MUTED}[${RST}${seg}${MUTED}]${RST}"
-fi
-# Fold cost onto the model line (its own segment); stand alone if no model info.
-if [ -n "$money" ]; then
-  if [ -n "$line2" ]; then
-    line2="${line2} ${GREEN}${money}${RST}"
-  else
-    line2="${GREEN}${money}${RST}"
-  fi
-fi
-[ -n "$line2" ] && printf '%s\n' "$line2"
-
-# ── Line 3: CTX bar ─────────────────────────────────────────────────────────
+# ── Line 2: CTX bar ─────────────────────────────────────────────────────────
 # Build the CTX trailing text FIRST (colored form for output, plus a plain twin
 # whose length feeds the shared bar reserve): the CTX line's trailing text is
 # usually the widest, so the bar can't be sized until it's known.
@@ -705,7 +748,7 @@ if [ -n "$exceeds_200k" ]; then
 fi
 ctx_overhead=$((CTX_FIXED + ${#ctx_detail_plain} + ${#ctx_warn_plain}))
 
-# ── Lines 4-5: rate-limit windows — compute pieces, then render ──────────────
+# ── Lines 3-4: rate-limit windows — compute pieces, then render ──────────────
 # One `date` call for both windows (they share the same "now").
 NOW=$(date +%s)
 
@@ -788,13 +831,13 @@ for _o in "${_win_over[@]}"; do [ "$_o" -gt "$reserve" ] && reserve=$_o; done
 reserve=$((reserve + BAR_SAFETY))
 pip_count=$(pip_count_for_width "$cols" "$reserve")
 
-# Render Line 3 (CTX).
+# Render Line 2 (CTX).
 ctx_bar=$(render_bar "$used_int" "$ac" "" "$pip_count" "$AUTOCOMPACT")
 printf -v ctx_lbl '%-3s' "CTX"
 printf -v ctx_pct '%3s' "$used_int"
 printf '%s%s%s %s %s%s%%%s%s%s\n' "$MUTED" "$ctx_lbl" "$RST" "$ctx_bar" "$ctx_pct_color" "$ctx_pct" "$RST" "$ctx_detail" "$ctx_warn"
 
-# Render Lines 4-5 (rate-limit windows). The "no data yet" placeholder is a
+# Render Lines 3-4 (rate-limit windows). The "no data yet" placeholder is a
 # 5h-labelled fallback; a 7d row can still render on its own when it has data.
 if [ "$five_has_data" -eq 0 ]; then
   printf -v lbl '%-3s' "5h"
