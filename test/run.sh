@@ -125,6 +125,29 @@ assert "256-color: no truecolor escapes" "$c"
 run_sl 120 "$P_NORMAL" > /dev/null; assert "exit 0 when 7d hidden" "$?"
 run_sl 120 "$P_SEVEN_BINDING" > /dev/null; assert "exit 0 when 7d shown" "$?"
 
+# ── Width discipline: no line may exceed COLUMNS ─────────────────────────────
+# The bars stretch to fill the row, so the width math must reserve room for each
+# line's *trailing* text (the CTX token/cache/AC/200k+ readout is the widest and
+# once ran the bar off the right edge). This is the regression guard for that:
+# render at many widths, incl. a worst-case CTX payload, and fail if the visible
+# (ANSI-stripped) width of ANY line exceeds COLUMNS. Runs in the non-git temp dir
+# so line 1 stays short and the bar lines are what's under test.
+#
+# Floor at 60 cols: MIN_PIP_COUNT keeps the bar readable (>=12 pips) rather than
+# collapsing it, so a very narrow pane whose fixed readout is itself wider than
+# the pane will still overflow by design — that's the readable-bar backstop, not
+# a width-math bug. 60 is the narrowest width the snapshot cases exercise.
+P_WIDE='{'"$DIR"',"context_window":{"used_percentage":92,"total_input_tokens":185000,"context_window_size":200000,"current_usage":{"cache_read_input_tokens":185000}},"exceeds_200k_tokens":true,"model":{"display_name":"Opus 4.8"},"effort":{"level":"high"},"rate_limits":{"five_hour":{"used_percentage":63,"resets_at":'"$FAR_FUTURE"'},"seven_day":{"used_percentage":80,"resets_at":'"$FAR_FUTURE"'}}}'
+widest_line() { awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }'; }
+overflow=0
+for pw in "$P_NORMAL" "$P_AUTOCOMPACT" "$P_WIDE"; do
+  for w in 60 80 100 120 160 200; do
+    max=$(run_sl "$w" "$pw" | strip_ansi | widest_line)
+    [ "$max" -gt "$w" ] && overflow=1
+  done
+done
+assert "width: no line exceeds COLUMNS (all payloads/widths)" "$overflow"
+
 # ── Long-branch truncation (git) ────────────────────────────────────────────
 GITREPO=$(mktemp -d)
 # core.hooksPath=/dev/null + --no-verify keep any globally-configured hooks
