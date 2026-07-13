@@ -1,4 +1,4 @@
 DevEnv/claude-statusline
-[Opus 4.8 1M High Explanatory] $1.23 ($7.38/h)
+[Opus 4.8 1M High Explanatory][$1.23 ($7.38/h)]
 CTX ######------|---  42% 420k/1M cache 85% 38%->AC
 5h  |##########-----  73% 5h 0m left [+73%] 7d 45%

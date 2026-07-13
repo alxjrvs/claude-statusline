@@ -88,6 +88,11 @@ P_NEAR_AC='{'"$DIR"',"context_window":{"used_percentage":70,"total_input_tokens"
 
 P_FRESH='{"workspace":{"current_dir":"/work/scratch/tmp"},"context_window":{"used_percentage":3,"total_input_tokens":8000,"context_window_size":200000},"model":{"display_name":"Haiku 4.5"}}'
 
+# Rich line-1: agent.name (wins over session_name), vim mode, and the xhigh effort
+# tier — exercises the fields folded onto line 1 by the compact layout. agent name
+# -> [name] chip; vim NORMAL -> [N]; effort xhigh -> "XHi" (not "Xhigh").
+P_RICH='{'"$DIR"',"session_name":"mine","agent":{"name":"reviewer"},"vim":{"mode":"NORMAL"},"context_window":{"used_percentage":42,"total_input_tokens":420000,"context_window_size":1000000,"current_usage":{"cache_read_input_tokens":360000}},"model":{"display_name":"Opus 4.8 (1M context)"},"effort":{"level":"xhigh"},"output_style":{"name":"Explanatory"},"cost":{"total_cost_usd":1.23,"total_duration_ms":600000},"rate_limits":{"five_hour":{"used_percentage":73,"resets_at":'"$FAR_FUTURE"'},"seven_day":{"used_percentage":45,"resets_at":'"$FAR_FUTURE"'}}}'
+
 # ── Cases (non-git) ────────────────────────────────────────────────────────
 NONGIT=$(mktemp -d)
 trap 'rm -rf "$NONGIT" "$GITREPO"' EXIT
@@ -99,6 +104,7 @@ snapshot autocompact     120 "$P_AUTOCOMPACT"
 snapshot near-ac         120 "$P_NEAR_AC"
 snapshot fresh-no-rate   120 "$P_FRESH"
 snapshot narrow          60  "$P_NORMAL"
+snapshot rich-line1      120 "$P_RICH"
 
 # ── Color-mode assertions (non-git) ─────────────────────────────────────────
 esc=$(printf '\033')
