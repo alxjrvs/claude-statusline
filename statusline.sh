@@ -75,14 +75,25 @@ fi
 
 DEFAULT_PIP_COUNT=30 # fallback when the terminal width is unknown
 
-# Bars stretch to fill the row: pip_count = cols - BAR_RESERVE, so on a wide
-# terminal the bar uses all the space the fixed text leaves free. BAR_RESERVE is
-# the widest fixed overhead across all bar lines (the 5h/7d window line):
-#   label(3) + space + space + pct(3) + '%' + space + time(<=9) + space +
-#   '[' + delta(<=5) + ']'  ~= 25 visible cols, +3 safety margin.
-# All bars share one pip_count (driven by the same cols) so they stay vertically
-# aligned; the CTX line's smaller overhead just leaves a little trailing slack.
-BAR_RESERVE=28
+# Bars stretch to fill the row: pip_count = cols - reserve, where `reserve` is
+# the widest fixed (non-bar) overhead among the bar lines this render. All bars
+# share that one pip_count, so they render at equal width and their % columns
+# line up vertically.
+#
+# The reserve is computed at runtime (not a fixed constant) because a bar line's
+# trailing text is variable-width: the CTX line carries token counts, a cache%,
+# and headroom / AC / 200k+ chips; the 5h/7d lines carry a time-left + delta (+
+# an inline "7d N%" badge). A constant tuned only to the window line let the
+# often-wider CTX detail run off the right edge. Each line's overhead is
+# <fixed prefix> + <measured trailing text>:
+#   CTX line: CTX_FIXED + len(detail) + len(warn)
+#   5h/7d   : WIN_FIXED + len(time) + len(delta) + len(inline 7d badge)
+# where the *_FIXED constants count the non-bar, non-trailing cols — the label,
+# the spaces around the bar, the pct field + '%', and each line's fixed literals
+# (" left [ ]" on the window lines).
+CTX_FIXED=9
+WIN_FIXED=18
+BAR_SAFETY=1     # leave one blank col at the right edge of the widest bar line
 MIN_PIP_COUNT=12 # keep the bar readable on a narrow pane (and >1 for the gradient divisor)
 
 # Claude Code reports the *full* terminal width via COLUMNS, but it renders the
@@ -147,15 +158,16 @@ if [ -n "${CMUX_SURFACE_ID:-}${CMUX_BUNDLE_ID:-}" ]; then
   osc8() { printf '%s' "$2"; }
 fi
 
-# Bar width from terminal columns: fill the row edge-to-edge, reserving
-# BAR_RESERVE cols for the fixed text, with a MIN_PIP_COUNT floor (no ceiling).
+# Bar width: fill the row edge-to-edge, holding back `reserve` cols for the
+# widest bar line's fixed + trailing text, with a MIN_PIP_COUNT floor (no
+# ceiling). Falls back to DEFAULT_PIP_COUNT when the width is unknown.
 pip_count_for_width() {
-  local c=$1
+  local c=$1 reserve=$2
   if [ -z "$c" ]; then
     echo "$DEFAULT_PIP_COUNT"
     return
   fi
-  local n=$((c - BAR_RESERVE))
+  local n=$((c - reserve))
   [ "$n" -lt "$MIN_PIP_COUNT" ] && n=$MIN_PIP_COUNT
   echo "$n"
 }
@@ -210,11 +222,9 @@ build_palette() {
 }
 build_palette
 
-# render_bar <pct> <marker_pct|""> <proj_pct|""> <cols|""> <marker_color>
+# render_bar <pct> <marker_pct|""> <proj_pct|""> <pip_count> <marker_color>
 render_bar() {
-  local pct=$1 marker_pct=$2 proj_pct=$3 cols=$4 marker_color=$5
-  local pip_count
-  pip_count=$(pip_count_for_width "$cols")
+  local pct=$1 marker_pct=$2 proj_pct=$3 pip_count=$4 marker_color=$5
   [ "$pct" -lt 0 ] && pct=0
   local filled=$((pct * pip_count / 100))
   [ "$filled" -gt "$pip_count" ] && filled=$pip_count
@@ -639,54 +649,76 @@ fi
 [ -n "$line2" ] && printf '%s\n' "$line2"
 
 # ── Line 3: CTX bar ─────────────────────────────────────────────────────────
+# Build the CTX trailing text FIRST (colored form for output, plus a plain twin
+# whose length feeds the shared bar reserve): the CTX line's trailing text is
+# usually the widest, so the bar can't be sized until it's known.
 used_int=$(int_prefix "$used_pct")
-ctx_bar=$(render_bar "$used_int" "$ac" "" "$cols" "$AUTOCOMPACT")
 
-# Absolute token readout + cache-hit ratio (both from the live context_window).
-# used_percentage is input-only, so this adds the raw figure and how much of the
-# context is being served from the prompt cache — a session-efficiency signal.
-ctx_detail=""
+# Detail = absolute token readout + prompt-cache hit ratio (both from the live
+# context_window). used_percentage is input-only, so this adds the raw figure and
+# how much of the context is served from cache — a session-efficiency signal.
+ctx_detail="" ctx_detail_plain=""
 if [ "$ctx_input_tokens" -gt 0 ]; then
   if [ "$ctx_window_size" -gt 0 ]; then
-    ctx_detail=" ${MUTED}$(abbrev_num "$ctx_input_tokens")/$(abbrev_num "$ctx_window_size")${RST}"
+    ctx_tok="$(abbrev_num "$ctx_input_tokens")/$(abbrev_num "$ctx_window_size")"
   else
-    ctx_detail=" ${MUTED}$(abbrev_num "$ctx_input_tokens")${RST}"
+    ctx_tok="$(abbrev_num "$ctx_input_tokens")"
   fi
+  ctx_detail=" ${MUTED}${ctx_tok}${RST}"
+  ctx_detail_plain=" ${ctx_tok}"
   if [ "$cache_read_tokens" -gt 0 ]; then
     cache_pct=$((cache_read_tokens * 100 / ctx_input_tokens))
     [ "$cache_pct" -gt 100 ] && cache_pct=100
     ctx_detail="${ctx_detail} ${MUTED}cache ${cache_pct}%${RST}"
+    ctx_detail_plain="${ctx_detail_plain} cache ${cache_pct}%"
   fi
 fi
 
 # Escalate the pct color as it nears autocompact, and make the threshold active:
 # show live headroom (N%->AC) below it, a bracket chip [AC] once crossed.
 ctx_pct_color=$GREEN
-ctx_warn=""
+ctx_warn="" ctx_warn_plain=""
 if [ "$used_int" -ge "$ac" ]; then
   ctx_pct_color=$RED
   ctx_warn=" ${MUTED}[${AUTOCOMPACT}AC${MUTED}]${RST}"
+  ctx_warn_plain=" [AC]"
 else
   [ "$used_int" -ge $((ac - 15)) ] && ctx_pct_color=$YELLOW
   ctx_detail="${ctx_detail} ${MUTED}$((ac - used_int))%->AC${RST}"
+  ctx_detail_plain="${ctx_detail_plain} $((ac - used_int))%->AC"
 fi
-[ -n "$exceeds_200k" ] && ctx_warn="${ctx_warn} ${MUTED}[${BOLD}${RED}200k+${RST}${MUTED}]${RST}"
-printf -v ctx_lbl '%-3s' "CTX"
-printf -v ctx_pct '%3s' "$used_int"
-printf '%s%s%s %s %s%s%%%s%s%s\n' "$MUTED" "$ctx_lbl" "$RST" "$ctx_bar" "$ctx_pct_color" "$ctx_pct" "$RST" "$ctx_detail" "$ctx_warn"
+if [ -n "$exceeds_200k" ]; then
+  ctx_warn="${ctx_warn} ${MUTED}[${BOLD}${RED}200k+${RST}${MUTED}]${RST}"
+  ctx_warn_plain="${ctx_warn_plain} [200k+]"
+fi
+ctx_overhead=$((CTX_FIXED + ${#ctx_detail_plain} + ${#ctx_warn_plain}))
 
-# ── Lines 4-5: rate-limit windows ───────────────────────────────────────────
+# ── Lines 4-5: rate-limit windows — compute pieces, then render ──────────────
 # One `date` call for both windows (they share the same "now").
 NOW=$(date +%s)
-print_window() {
-  local pct_str=$1 resets_str=$2 window_min=$3 label=$4 extra=$5
-  if [ -z "$pct_str" ] || [ -z "$resets_str" ]; then
-    if [ "$label" = "5h" ]; then
-      printf -v lbl '%-3s' "$label"
-      printf '%s%s%s %sno rate-limit data yet%s\n' "$MUTED" "$lbl" "$RST" "$MUTED" "$RST"
-    fi
-    return
-  fi
+
+# 7d earns its own row only when it's the binding window (>=50% or higher than
+# 5h); otherwise it rides inline on the 5h line as a compact "7d N%" badge, so a
+# quiet week doesn't cost a whole bar row.
+five_int=$(int_prefix "$five_pct")
+seven_int=$(int_prefix "$seven_pct")
+show_7d=0
+if [ -n "$seven_pct" ] && [ -n "$seven_resets_at" ]; then
+  if [ "$seven_int" -ge 50 ] || [ "$seven_int" -gt "$five_int" ]; then show_7d=1; fi
+fi
+five_extra="" five_extra_plain=""
+if [ "$show_7d" -eq 0 ] && [ -n "$seven_pct" ]; then
+  five_extra=" ${MUTED}7d ${seven_int}%${RST}"
+  five_extra_plain=" 7d ${seven_int}%"
+fi
+
+# Registry of computed windows (parallel indexed arrays; bash 3.2 safe). Each
+# window's display pieces are computed up front — including its trailing-text
+# overhead — so the shared bar reserve can account for every bar line before any
+# is rendered.
+_win_lbl=() _win_pct=() _win_clock=() _win_proj=() _win_time=() _win_delta=() _win_extra=() _win_over=()
+compute_window() {
+  local pct_str=$1 resets_str=$2 window_min=$3 label=$4 extra_disp=$5 extra_plain=$6
   local pct
   pct=$(int_prefix "$pct_str")
   local resets=$resets_str
@@ -697,12 +729,17 @@ print_window() {
   local clock_pct=$(((window_min - remain_min) * 100 / window_min))
   local proj_pct=""
   [ "$clock_pct" -gt 5 ] && proj_pct=$((pct * 100 / clock_pct))
-  local delta=$((pct - clock_pct)) delta_str
+  local delta=$((pct - clock_pct)) delta_disp delta_plain
   if [ "$delta" -gt 0 ]; then
-    delta_str="${RED}+${delta}%${RST}"
+    delta_disp="${RED}+${delta}%${RST}"
+    delta_plain="+${delta}%"
   elif [ "$delta" -lt 0 ]; then
-    delta_str="${GREEN}${delta}%${RST}"
-  else delta_str="${MUTED}0%${RST}"; fi
+    delta_disp="${GREEN}${delta}%${RST}"
+    delta_plain="${delta}%"
+  else
+    delta_disp="${MUTED}0%${RST}"
+    delta_plain="0%"
+  fi
 
   # Time remaining, framed as "… left" (no leading '-', which read as negative).
   local time_label
@@ -714,30 +751,58 @@ print_window() {
     printf -v time_label '%dm' "$remain_min"
   fi
 
-  local bar
-  bar=$(render_bar "$pct" "$clock_pct" "$proj_pct" "$cols" "$MARKER")
-  printf -v lbl '%-3s' "$label"
-  printf -v pctf '%3s' "$pct"
-  printf '%s%s%s %s %s%s%%%s %s%s left%s [%s%s]%s%s\n' \
-    "$MUTED" "$lbl" "$RST" "$bar" "$MUTED" "$pctf" "$RST" \
-    "$MARKER" "$time_label" "$RST" "$delta_str" "$MUTED" "$RST" "$extra"
+  local n=${#_win_lbl[@]}
+  _win_lbl[n]=$label
+  _win_pct[n]=$pct
+  _win_clock[n]=$clock_pct
+  _win_proj[n]=$proj_pct
+  _win_time[n]=$time_label
+  _win_delta[n]=$delta_disp
+  _win_extra[n]=$extra_disp
+  _win_over[n]=$((WIN_FIXED + ${#time_label} + ${#delta_plain} + ${#extra_plain}))
 }
 
-# 7d earns its own row only when it's the binding window (>=50% or higher than
-# 5h); otherwise it rides inline on the 5h line as a compact "7d N%" badge, so a
-# quiet week doesn't cost a whole bar row.
-five_int=$(int_prefix "$five_pct")
-seven_int=$(int_prefix "$seven_pct")
-show_7d=0
-if [ -n "$seven_pct" ] && [ -n "$seven_resets_at" ]; then
-  if [ "$seven_int" -ge 50 ] || [ "$seven_int" -gt "$five_int" ]; then show_7d=1; fi
+five_has_data=0
+if [ -n "$five_pct" ] && [ -n "$five_resets_at" ]; then
+  five_has_data=1
+  compute_window "$five_pct" "$five_resets_at" 300 "5h" "$five_extra" "$five_extra_plain"
 fi
-five_extra=""
-[ "$show_7d" -eq 0 ] && [ -n "$seven_pct" ] && five_extra=" ${MUTED}7d ${seven_int}%${RST}"
+[ "$show_7d" -eq 1 ] && compute_window "$seven_pct" "$seven_resets_at" 10080 "7d" "" ""
 
-print_window "$five_pct" "$five_resets_at" 300 "5h" "$five_extra"
-[ "$show_7d" -eq 1 ] && print_window "$seven_pct" "$seven_resets_at" 10080 "7d" ""
+# Shared bar width: hold back the widest overhead across the CTX + window lines
+# so no line's trailing text can run off the right edge, plus one safety col.
+reserve=$ctx_overhead
+for _o in "${_win_over[@]}"; do [ "$_o" -gt "$reserve" ] && reserve=$_o; done
+reserve=$((reserve + BAR_SAFETY))
+pip_count=$(pip_count_for_width "$cols" "$reserve")
 
-# Always succeed: a statusline must never signal failure to Claude Code (the
-# final conditional above would otherwise leak a non-zero status when 7d hides).
+# Render Line 3 (CTX).
+ctx_bar=$(render_bar "$used_int" "$ac" "" "$pip_count" "$AUTOCOMPACT")
+printf -v ctx_lbl '%-3s' "CTX"
+printf -v ctx_pct '%3s' "$used_int"
+printf '%s%s%s %s %s%s%%%s%s%s\n' "$MUTED" "$ctx_lbl" "$RST" "$ctx_bar" "$ctx_pct_color" "$ctx_pct" "$RST" "$ctx_detail" "$ctx_warn"
+
+# Render Lines 4-5 (rate-limit windows). The "no data yet" placeholder is a
+# 5h-labelled fallback; a 7d row can still render on its own when it has data.
+if [ "$five_has_data" -eq 0 ]; then
+  printf -v lbl '%-3s' "5h"
+  printf '%s%s%s %sno rate-limit data yet%s\n' "$MUTED" "$lbl" "$RST" "$MUTED" "$RST"
+fi
+render_window() {
+  local i=$1 bar lbl pctf
+  bar=$(render_bar "${_win_pct[i]}" "${_win_clock[i]}" "${_win_proj[i]}" "$pip_count" "$MARKER")
+  printf -v lbl '%-3s' "${_win_lbl[i]}"
+  printf -v pctf '%3s' "${_win_pct[i]}"
+  printf '%s%s%s %s %s%s%%%s %s%s left%s [%s%s]%s%s\n' \
+    "$MUTED" "$lbl" "$RST" "$bar" "$MUTED" "$pctf" "$RST" \
+    "$MARKER" "${_win_time[i]}" "$RST" "${_win_delta[i]}" "$MUTED" "$RST" "${_win_extra[i]}"
+}
+i=0
+while [ "$i" -lt "${#_win_lbl[@]}" ]; do
+  render_window "$i"
+  i=$((i + 1))
+done
+
+# Always succeed: a statusline must never signal failure to Claude Code (a
+# trailing conditional would otherwise leak a non-zero status).
 exit 0
