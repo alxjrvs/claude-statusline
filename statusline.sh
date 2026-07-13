@@ -63,6 +63,16 @@ DEFAULT_PIP_COUNT=30 # fallback when the terminal width is unknown
 BAR_RESERVE=28
 MIN_PIP_COUNT=12  # keep the bar readable on a narrow pane (and >1 for the gradient divisor)
 
+# Claude Code reports the *full* terminal width via COLUMNS, but it renders the
+# statusline inside its own chrome — a left indent plus a right-edge reservation
+# for its UI hints. Filling a bar line to exactly COLUMNS therefore overruns that
+# usable region: the row auto-wraps and shoves Claude's chrome off-screen. Hold
+# back a fixed margin so the bars still stretch to fill the row but stop short of
+# the chrome ("as wide as possible without losing Claude's UI"). Fixed, not
+# proportional: the chrome is a constant column cost regardless of terminal width.
+# Override with CLAUDE_STATUSLINE_CHROME_MARGIN when a build's chrome differs.
+CHROME_MARGIN=8
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 # Integer prefix of a string ("42.7" → 42, "" / garbage → 0).
@@ -336,6 +346,18 @@ case "${COLUMNS:-}" in
   *) cols=$COLUMNS ;;
 esac
 case "$cols" in '' | *[!0-9]*) cols="" ;; esac
+
+# Reserve chrome margin from the usable width (see CHROME_MARGIN above). Env
+# override wins when set to a non-negative integer; otherwise use the default.
+margin=$CHROME_MARGIN
+case "${CLAUDE_STATUSLINE_CHROME_MARGIN:-}" in
+  '' | *[!0-9]*) : ;;
+  *) margin=$CLAUDE_STATUSLINE_CHROME_MARGIN ;;
+esac
+if [ -n "$cols" ]; then
+  cols=$((cols - margin))
+  [ "$cols" -lt 1 ] && cols=1
+fi
 
 # ── Gather git state (self-contained; deliberately not the git-data cache) ──
 # GIT_OPTIONAL_LOCKS=0: this runs on every refresh in the background — it must
