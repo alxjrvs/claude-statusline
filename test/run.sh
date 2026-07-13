@@ -166,6 +166,22 @@ cd "$GITREPO" || exit 2
 P_LONGBRANCH='{"workspace":{"current_dir":"/work/proj/claude-statusline"},"context_window":{"used_percentage":10,"total_input_tokens":20000,"context_window_size":200000},"model":{"display_name":"Opus 4.8"}}'
 snapshot longbranch-trunc 100 "$P_LONGBRANCH"
 
+# ── Line 1 hard-bound + wrap (git, dirty, long branch) ───────────────────────
+# Dirty the repo so line 1 carries branch + counters + lines-changed groups;
+# with the long branch that's wider than a narrow pane, this exercises the wrap
+# to a continuation line. Line 1 must never exceed COLUMNS at any width, and the
+# 60-col snapshot locks the wrapped layout.
+: > untracked.txt    # -> "1 untracked"
+echo change >> f.txt # -> "1 modified" (unstaged)
+P_DIRTY='{"workspace":{"current_dir":"/work/proj/claude-statusline"},"context_window":{"used_percentage":10,"total_input_tokens":20000,"context_window_size":200000},"model":{"display_name":"Opus 4.8"},"cost":{"total_lines_added":120,"total_lines_removed":45}}'
+l1_overflow=0
+for w in 60 80 100 120 160; do
+  max=$(run_sl "$w" "$P_DIRTY" | strip_ansi | widest_line)
+  [ "$max" -gt "$w" ] && l1_overflow=1
+done
+assert "width: line 1 hard-bounds (git dirty, long branch)" "$l1_overflow"
+snapshot line1-wrap 60 "$P_DIRTY"
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 cd "$ROOT" || exit 2
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
