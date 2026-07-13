@@ -6,16 +6,16 @@
 #
 #   "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" }
 #
-# Reads the Claude Code statusline JSON on stdin and emits 3-6 colored lines:
+# Reads the Claude Code statusline JSON on stdin and emits 3-5 colored lines:
 #   Line 1: repo/dir [@branch(/worktree)][#N:state][counters][+N/-M]
-#   Line 2: [model ctxflag effort style]  e.g. [Opus 4.8 1M High Explanatory]
-#   Line 3: CTX <bar w/ amber autocompact cell> N% Nk/Nk cache N% AC 200k+
-#   Line 4: 5h  <bar> N% -Xh Ym [delta]
-#   Line 5: 7d  <bar> N% -Xd Yh [delta]
-#   Line 6: [$cost ($/h) N% api]
+#   Line 2: [model ctxflag effort style] $cost ($/h)
+#   Line 3: CTX <bar w/ amber autocompact cell> N% Nk/Nk cache N% N%->AC [200k+]
+#   Line 4: 5h  <bar> N% Xh Ym left [delta]   (+ inline "7d N%" when 7d hidden)
+#   Line 5: 7d  <bar> N% Xd Yh left [delta]   (shown only when 7d is binding)
 #
-# Pure ASCII; no Nerd Font required. Everything degrades gracefully: missing
-# fields just drop their segment.
+# Pure ASCII; no Nerd Font required. Colors honor NO_COLOR and degrade on
+# non-truecolor terminals. Everything degrades gracefully: missing fields just
+# drop their segment.
 #
 # Bash 3.2 compatible (macOS system bash).
 
@@ -33,35 +33,67 @@ PIP_PROJ='*'     # burn projection     (yellow)
 PIP_OVERFLOW='!' # projection overflow (bold red)
 SIG_BRANCH='@'   # branch    (evokes git @/HEAD)
 SIG_PR='#'       # pull request
-EMDASH='-'       # ASCII dash
+
+# ── Color capability ────────────────────────────────────────────────────────
+# Honor NO_COLOR (https://no-color.org) and dumb terminals; detect truecolor so
+# the 24-bit gradient can degrade to a 256-color ramp elsewhere. The ASCII pip
+# shapes already carry meaning without color, so mono output stays legible.
+USE_COLOR=1
+[ -n "${NO_COLOR:-}" ] && USE_COLOR=0
+[ "${TERM:-}" = "dumb" ] && USE_COLOR=0
+TRUECOLOR=0
+case "${COLORTERM:-}" in *truecolor* | *24bit*) TRUECOLOR=1 ;; esac
 
 # ── Style primitives ──────────────────────────────────────────────────────
-UNDIM="${ESC}[22m"
-BOLD="${ESC}[1m"
-RST="${ESC}[0m"
-MUTED="${ESC}[90m"
-RED="${ESC}[31m"
-GREEN="${ESC}[32m"
-YELLOW="${ESC}[33m"
-BLUE="${ESC}[34m"
-MAGENTA="${ESC}[35m"
-CYAN="${ESC}[36m"
-NEAR_WHITE="${ESC}[38;2;235;235;235m"
-MARKER="${ESC}[38;2;96;200;255m"     # rate-window clock pip (blue)
-PROJ="${ESC}[38;2;255;210;80m"       # burn projection pip (yellow)
-AUTOCOMPACT="${ESC}[38;2;255;128;0m" # autocompact threshold cell (amber)
+if [ "$USE_COLOR" -eq 0 ]; then
+  UNDIM="" BOLD="" RST="" MUTED="" RED="" GREEN="" YELLOW="" BLUE="" MAGENTA="" CYAN=""
+  NEAR_WHITE="" MARKER="" PROJ="" AUTOCOMPACT=""
+else
+  UNDIM="${ESC}[22m"
+  BOLD="${ESC}[1m"
+  RST="${ESC}[0m"
+  MUTED="${ESC}[90m"
+  RED="${ESC}[31m"
+  GREEN="${ESC}[32m"
+  YELLOW="${ESC}[33m"
+  BLUE="${ESC}[34m"
+  MAGENTA="${ESC}[35m"
+  CYAN="${ESC}[36m"
+  if [ "$TRUECOLOR" -eq 1 ]; then
+    NEAR_WHITE="${ESC}[38;2;235;235;235m"
+    MARKER="${ESC}[38;2;96;200;255m"     # rate-window clock pip (blue)
+    PROJ="${ESC}[38;2;255;210;80m"       # burn projection pip (yellow)
+    AUTOCOMPACT="${ESC}[38;2;255;128;0m" # autocompact threshold cell (amber)
+  else
+    # 256-color approximations for terminals without truecolor.
+    NEAR_WHITE="${ESC}[38;5;255m"
+    MARKER="${ESC}[38;5;39m"
+    PROJ="${ESC}[38;5;221m"
+    AUTOCOMPACT="${ESC}[38;5;208m"
+  fi
+fi
 
 DEFAULT_PIP_COUNT=30 # fallback when the terminal width is unknown
 
 # Bars stretch to fill the row: pip_count = cols - BAR_RESERVE, so on a wide
 # terminal the bar uses all the space the fixed text leaves free. BAR_RESERVE is
 # the widest fixed overhead across all bar lines (the 5h/7d window line):
-#   label(3) + space + space + pct(3) + '%' + space + '-' + time(<=6) + space +
+#   label(3) + space + space + pct(3) + '%' + space + time(<=9) + space +
 #   '[' + delta(<=5) + ']'  ~= 25 visible cols, +3 safety margin.
 # All bars share one pip_count (driven by the same cols) so they stay vertically
 # aligned; the CTX line's smaller overhead just leaves a little trailing slack.
 BAR_RESERVE=28
-MIN_PIP_COUNT=12  # keep the bar readable on a narrow pane (and >1 for the gradient divisor)
+MIN_PIP_COUNT=12 # keep the bar readable on a narrow pane (and >1 for the gradient divisor)
+
+# Claude Code reports the *full* terminal width via COLUMNS, but it renders the
+# statusline inside its own chrome — a left indent plus a right-edge reservation
+# for its UI hints. Filling a bar line to exactly COLUMNS therefore overruns that
+# usable region: the row auto-wraps and shoves Claude's chrome off-screen. Hold
+# back a fixed margin so the bars still stretch to fill the row but stop short of
+# the chrome ("as wide as possible without losing Claude's UI"). Fixed, not
+# proportional: the chrome is a constant column cost regardless of terminal width.
+# Override with CLAUDE_STATUSLINE_CHROME_MARGIN when a build's chrome differs.
+CHROME_MARGIN=8
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -84,6 +116,20 @@ abbrev_num() {
   else
     echo "$((n / 1000000))M"
   fi
+}
+
+# Middle-ellipsize a string to <=max visible chars ("longbranchname" → "long..name").
+# Pure ASCII ".." ellipsis. Leaves short strings and tiny budgets untouched.
+trunc_mid() {
+  local s=$1 max=$2 len=${#1}
+  if [ "$max" -lt 5 ] || [ "$len" -le "$max" ]; then
+    printf '%s' "$s"
+    return
+  fi
+  local keep=$((max - 2)) head tail
+  head=$(((keep + 1) / 2))
+  tail=$((keep / 2))
+  printf '%s..%s' "${s:0:head}" "${s:len-tail}"
 }
 
 # Build an OSC8 hyperlink: osc8 <url> <text>
@@ -140,6 +186,30 @@ gradient_at() {
   fi
 }
 
+# Precompute the fill gradient once as a small palette of SGR-open strings, so
+# render_bar is a table lookup per cell rather than a fresh gradient computation
+# per cell (a wide, now-uncapped bar can be 150+ cells across three bars every
+# refresh). Index a cell by gi = i*(GRAD_N-1)/(pip_count-1). Non-truecolor uses a
+# cool→warm 256-color ramp; NO_COLOR leaves the entries empty (bare '#' fill).
+GRAD_N=24
+_grad_palette=()
+_grad256_ramp=(60 66 96 132 168 203 202 208 214 220 228)
+build_palette() {
+  local i t
+  for ((i = 0; i < GRAD_N; i++)); do
+    t=$((i * 10000 / (GRAD_N - 1)))
+    if [ "$USE_COLOR" -eq 0 ]; then
+      _grad_palette[i]=""
+    elif [ "$TRUECOLOR" -eq 1 ]; then
+      gradient_at "$t"
+      _grad_palette[i]="${ESC}[38;2;${_GR};${_GG};${_GB}m"
+    else
+      _grad_palette[i]="${ESC}[38;5;${_grad256_ramp[$((t * (${#_grad256_ramp[@]} - 1) / 10000))]}m"
+    fi
+  done
+}
+build_palette
+
 # render_bar <pct> <marker_pct|""> <proj_pct|""> <cols|""> <marker_color>
 render_bar() {
   local pct=$1 marker_pct=$2 proj_pct=$3 cols=$4 marker_color=$5
@@ -174,7 +244,7 @@ render_bar() {
     fi
   fi
 
-  local out="" i pip
+  local out="" i pip gi
   for ((i = 0; i < pip_count; i++)); do
     if [ "$i" -lt "$filled" ]; then pip=$PIP_FILL; else pip=$PIP_EMPTY; fi
     if [ "$i" -eq "$marker_idx" ]; then
@@ -190,8 +260,8 @@ render_bar() {
         out="${out}${UNDIM}${PROJ}${PIP_PROJ}"
       fi
     elif [ "$i" -lt "$filled" ]; then
-      gradient_at $((i * 10000 / (pip_count - 1)))
-      out="${out}${UNDIM}${ESC}[38;2;${_GR};${_GG};${_GB}m${pip}"
+      gi=$((i * (GRAD_N - 1) / (pip_count - 1)))
+      out="${out}${UNDIM}${_grad_palette[gi]}${pip}"
     else
       out="${out}${MUTED}${pip}"
     fi
@@ -263,7 +333,6 @@ fields=$(printf '%s' "$input" | jq -r '
   "output_style=\(.output_style.name // "")",
   "cost_usd=\(.cost.total_cost_usd // "" | tostring)",
   "duration_ms=\(.cost.total_duration_ms // 0 | tostring)",
-  "api_duration_ms=\(.cost.total_api_duration_ms // 0 | tostring)",
   "lines_added=\(.cost.total_lines_added // 0 | tostring)",
   "lines_removed=\(.cost.total_lines_removed // 0 | tostring)",
   "pr_number=\(.pr.number // "" | tostring)",
@@ -280,7 +349,7 @@ used_pct="" ctx_input_tokens=0 ctx_window_size=0 cache_read_tokens=0
 worktree_name_input="" project_dir="" cwd_input=""
 repo_host="" repo_owner="" repo_name_input=""
 model_name="" effort_level="" output_style="" cost_usd="" duration_ms=0
-api_duration_ms=0 lines_added=0
+lines_added=0
 lines_removed=0 pr_number="" pr_state="" exceeds_200k="" five_pct=""
 five_resets_at="" seven_pct="" seven_resets_at="" cols=""
 
@@ -304,7 +373,6 @@ while IFS= read -r _kv || [ -n "$_kv" ]; do
     output_style) output_style=$_v ;;
     cost_usd) cost_usd=$_v ;;
     duration_ms) duration_ms=$_v ;;
-    api_duration_ms) api_duration_ms=$_v ;;
     lines_added) lines_added=$_v ;;
     lines_removed) lines_removed=$_v ;;
     pr_number) pr_number=$_v ;;
@@ -320,7 +388,6 @@ done <<< "$fields"
 
 # Normalize numeric-ish fields.
 duration_ms=$(int_prefix "$duration_ms")
-api_duration_ms=$(int_prefix "$api_duration_ms")
 lines_added=$(int_prefix "$lines_added")
 lines_removed=$(int_prefix "$lines_removed")
 ctx_input_tokens=$(int_prefix "$ctx_input_tokens")
@@ -336,6 +403,18 @@ case "${COLUMNS:-}" in
   *) cols=$COLUMNS ;;
 esac
 case "$cols" in '' | *[!0-9]*) cols="" ;; esac
+
+# Reserve chrome margin from the usable width (see CHROME_MARGIN above). Env
+# override wins when set to a non-negative integer; otherwise use the default.
+margin=$CHROME_MARGIN
+case "${CLAUDE_STATUSLINE_CHROME_MARGIN:-}" in
+  '' | *[!0-9]*) : ;;
+  *) margin=$CLAUDE_STATUSLINE_CHROME_MARGIN ;;
+esac
+if [ -n "$cols" ]; then
+  cols=$((cols - margin))
+  [ "$cols" -lt 1 ] && cols=1
+fi
 
 # ── Gather git state (self-contained; deliberately not the git-data cache) ──
 # GIT_OPTIONAL_LOCKS=0: this runs on every refresh in the background — it must
@@ -424,6 +503,19 @@ else
 fi
 dir_disp=$(dir_display "$cwd")
 
+# Line-1 name budgets: keep long branch / worktree names from blowing line 1 past
+# the pane and re-triggering the very wrap CHROME_MARGIN guards against. Scale
+# with width when known, with sane floors; be generous when width is unknown.
+if [ -n "$cols" ]; then
+  branch_max=$((cols / 3))
+  [ "$branch_max" -lt 14 ] && branch_max=14
+  wt_max=$((cols / 5))
+  [ "$wt_max" -lt 8 ] && wt_max=8
+else
+  branch_max=40
+  wt_max=24
+fi
+
 # ── Line 1 ──────────────────────────────────────────────────────────────────
 if [ -n "$repo_name" ]; then
   id_part="${BOLD}${NEAR_WHITE}$(osc8 "$repo_https" "$repo_name")${RST}"
@@ -440,14 +532,16 @@ wt=$worktree_name_input
 if [ "$git_is_repo" -eq 1 ] || [ -n "$branch" ]; then
   b=$branch
   [ -z "$b" ] && b="-"
+  # Truncate the *displayed* text only; the hyperlink target keeps the full ref.
+  b_txt=$(trunc_mid "$b" "$branch_max")
   if [ -n "$repo_https" ] && [ -n "$branch" ]; then
-    b_disp=$(osc8 "$repo_https/tree/$branch" "$b")
+    b_disp=$(osc8 "$repo_https/tree/$branch" "$b_txt")
   else
-    b_disp=$b
+    b_disp=$b_txt
   fi
   # In a worktree, fold branch + worktree into one cell: @<branch>/<worktree>
   # (branch stays blue/linked; the /<worktree> suffix keeps worktree-magenta).
-  [ -n "$wt" ] && b_disp="${b_disp}${MAGENTA}/${wt}"
+  [ -n "$wt" ] && b_disp="${b_disp}${MAGENTA}/$(trunc_mid "$wt" "$wt_max")"
   line1="${line1}${MUTED}[${BLUE}${BOLD}${SIG_BRANCH}${b_disp}${RST}${MUTED}]${RST}"
 fi
 
@@ -484,8 +578,18 @@ if [ "$lines_added" -gt 0 ] || [ "$lines_removed" -gt 0 ]; then
 fi
 printf '%s\n' "$line1"
 
-# ── Line 2: model · effort · context flag · output style — distinct colors ───
-# "Opus 4.8 (1M context)" + "high" + "Explanatory" -> [Opus 4.8 High 1M Explanatory]
+# ── Line 2: model · ctx flag · effort · style · cost — distinct colors ───────
+# "Opus 4.8 (1M context)" + "high" + "Explanatory" + $cost ->
+#   [Opus 4.8 1M High Explanatory] $1.23 ($7.38/h)
+# Cost is folded onto this line (rather than its own row) to keep the statusline
+# short; a single awk pass formats the total and the per-hour burn.
+money=$(awk -v c="$cost_usd" -v d="$duration_ms" 'BEGIN{
+  if (c ~ /^[0-9]+(\.[0-9]+)?$/) {
+    printf "$%.2f", c
+    if (c+0 > 0 && d+0 >= 60000) printf " ($%.2f/h)", (c+0) / ((d+0)/3600000.0)
+  }
+}')
+
 line2=""
 if [ -n "$model_name" ] || [ -n "$effort_level" ] || [ -n "$output_style" ]; then
   model_short="${model_name%% (*}" # short name: drop the " (...)" suffix
@@ -524,6 +628,14 @@ if [ -n "$model_name" ] || [ -n "$effort_level" ] || [ -n "$output_style" ]; the
 
   [ -n "$seg" ] && line2="${MUTED}[${RST}${seg}${MUTED}]${RST}"
 fi
+# Fold cost onto the model line (its own segment); stand alone if no model info.
+if [ -n "$money" ]; then
+  if [ -n "$line2" ]; then
+    line2="${line2} ${GREEN}${money}${RST}"
+  else
+    line2="${GREEN}${money}${RST}"
+  fi
+fi
 [ -n "$line2" ] && printf '%s\n' "$line2"
 
 # ── Line 3: CTX bar ─────────────────────────────────────────────────────────
@@ -547,21 +659,31 @@ if [ "$ctx_input_tokens" -gt 0 ]; then
   fi
 fi
 
+# Escalate the pct color as it nears autocompact, and make the threshold active:
+# show live headroom (N%->AC) below it, a bracket chip [AC] once crossed.
+ctx_pct_color=$GREEN
 ctx_warn=""
-[ "$used_int" -ge "$ac" ] && ctx_warn=" ${AUTOCOMPACT}AC${RST}"
-[ -n "$exceeds_200k" ] && ctx_warn="${ctx_warn} ${BOLD}${RED}200k+${RST}"
+if [ "$used_int" -ge "$ac" ]; then
+  ctx_pct_color=$RED
+  ctx_warn=" ${MUTED}[${AUTOCOMPACT}AC${MUTED}]${RST}"
+else
+  [ "$used_int" -ge $((ac - 15)) ] && ctx_pct_color=$YELLOW
+  ctx_detail="${ctx_detail} ${MUTED}$((ac - used_int))%->AC${RST}"
+fi
+[ -n "$exceeds_200k" ] && ctx_warn="${ctx_warn} ${MUTED}[${BOLD}${RED}200k+${RST}${MUTED}]${RST}"
 printf -v ctx_lbl '%-3s' "CTX"
 printf -v ctx_pct '%3s' "$used_int"
-printf '%s%s%s %s %s%s%%%s%s%s\n' "$MUTED" "$ctx_lbl" "$RST" "$ctx_bar" "$MUTED" "$ctx_pct" "$RST" "$ctx_detail" "$ctx_warn"
+printf '%s%s%s %s %s%s%%%s%s%s\n' "$MUTED" "$ctx_lbl" "$RST" "$ctx_bar" "$ctx_pct_color" "$ctx_pct" "$RST" "$ctx_detail" "$ctx_warn"
 
 # ── Lines 4-5: rate-limit windows ───────────────────────────────────────────
+# One `date` call for both windows (they share the same "now").
+NOW=$(date +%s)
 print_window() {
-  local pct_str=$1 resets_str=$2 window_min=$3 label=$4
+  local pct_str=$1 resets_str=$2 window_min=$3 label=$4 extra=$5
   if [ -z "$pct_str" ] || [ -z "$resets_str" ]; then
     if [ "$label" = "5h" ]; then
       printf -v lbl '%-3s' "$label"
-      printf '%s%s%s %s[ rate_limits unavailable %s make a request to populate ]%s\n' \
-        "$MUTED" "$lbl" "$RST" "$MUTED" "$EMDASH" "$RST"
+      printf '%s%s%s %sno rate-limit data yet%s\n' "$MUTED" "$lbl" "$RST" "$MUTED" "$RST"
     fi
     return
   fi
@@ -569,9 +691,7 @@ print_window() {
   pct=$(int_prefix "$pct_str")
   local resets=$resets_str
   case "$resets" in *[!0-9]*) resets=0 ;; esac
-  local now
-  now=$(date +%s)
-  local remain_sec=$((resets > now ? resets - now : 0))
+  local remain_sec=$((resets > NOW ? resets - NOW : 0))
   local remain_min=$((remain_sec / 60))
   [ "$remain_min" -gt "$window_min" ] && remain_min=$window_min
   local clock_pct=$(((window_min - remain_min) * 100 / window_min))
@@ -584,11 +704,12 @@ print_window() {
     delta_str="${GREEN}${delta}%${RST}"
   else delta_str="${MUTED}0%${RST}"; fi
 
+  # Time remaining, framed as "… left" (no leading '-', which read as negative).
   local time_label
   if [ "$remain_min" -ge 1440 ]; then
-    printf -v time_label '%dd %02dh' "$((remain_min / 1440))" "$(((remain_min % 1440) / 60))"
+    printf -v time_label '%dd %dh' "$((remain_min / 1440))" "$(((remain_min % 1440) / 60))"
   elif [ "$remain_min" -ge 60 ]; then
-    printf -v time_label '%dh %02dm' "$((remain_min / 60))" "$((remain_min % 60))"
+    printf -v time_label '%dh %dm' "$((remain_min / 60))" "$((remain_min % 60))"
   else
     printf -v time_label '%dm' "$remain_min"
   fi
@@ -597,27 +718,26 @@ print_window() {
   bar=$(render_bar "$pct" "$clock_pct" "$proj_pct" "$cols" "$MARKER")
   printf -v lbl '%-3s' "$label"
   printf -v pctf '%3s' "$pct"
-  printf '%s%s%s %s %s%s%%%s %s-%s%s [%s%s]%s\n' \
+  printf '%s%s%s %s %s%s%%%s %s%s left%s [%s%s]%s%s\n' \
     "$MUTED" "$lbl" "$RST" "$bar" "$MUTED" "$pctf" "$RST" \
-    "$MARKER" "$time_label" "$RST" "$delta_str" "$MUTED" "$RST"
+    "$MARKER" "$time_label" "$RST" "$delta_str" "$MUTED" "$RST" "$extra"
 }
-print_window "$five_pct" "$five_resets_at" 300 "5h"
-print_window "$seven_pct" "$seven_resets_at" 10080 "7d"
 
-# ── Line 6: cost ────────────────────────────────────────────────────────────
-cost_display=$(awk -v c="$cost_usd" 'BEGIN{ if (c ~ /^[0-9]+(\.[0-9]+)?$/) printf "$%.2f", c }')
-if [ -n "$cost_display" ]; then
-  money=$cost_display
-  burn=$(awk -v c="$cost_usd" -v d="$duration_ms" 'BEGIN{
-    if (c ~ /^[0-9]+(\.[0-9]+)?$/ && c+0 > 0 && d+0 >= 60000)
-      printf "$%.2f/h", (c+0) / ((d+0)/3600000.0) }')
-  [ -n "$burn" ] && money="${money} (${burn})"
-  # Share of wall-clock spent waiting on the API vs. local/idle time.
-  api_str=""
-  if [ "$duration_ms" -ge 60000 ] && [ "$api_duration_ms" -gt 0 ]; then
-    api_pct=$((api_duration_ms * 100 / duration_ms))
-    [ "$api_pct" -gt 100 ] && api_pct=100
-    api_str=" ${MUTED}${api_pct}% api${RST}"
-  fi
-  printf '%s[%s%s%s%s%s%s]%s\n' "$MUTED" "$RST" "$GREEN" "$money" "$RST" "$api_str" "$MUTED" "$RST"
+# 7d earns its own row only when it's the binding window (>=50% or higher than
+# 5h); otherwise it rides inline on the 5h line as a compact "7d N%" badge, so a
+# quiet week doesn't cost a whole bar row.
+five_int=$(int_prefix "$five_pct")
+seven_int=$(int_prefix "$seven_pct")
+show_7d=0
+if [ -n "$seven_pct" ] && [ -n "$seven_resets_at" ]; then
+  if [ "$seven_int" -ge 50 ] || [ "$seven_int" -gt "$five_int" ]; then show_7d=1; fi
 fi
+five_extra=""
+[ "$show_7d" -eq 0 ] && [ -n "$seven_pct" ] && five_extra=" ${MUTED}7d ${seven_int}%${RST}"
+
+print_window "$five_pct" "$five_resets_at" 300 "5h" "$five_extra"
+[ "$show_7d" -eq 1 ] && print_window "$seven_pct" "$seven_resets_at" 10080 "7d" ""
+
+# Always succeed: a statusline must never signal failure to Claude Code (the
+# final conditional above would otherwise leak a non-zero status when 7d hides).
+exit 0

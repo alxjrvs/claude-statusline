@@ -1,0 +1,4 @@
+proj/claude-statusline [@feature/some-r..name-goes-here]
+[Opus 4.8]
+CTX ######---------------------------------------------|------------  10% 20k/200k 70%->AC
+5h  no rate-limit data yet
