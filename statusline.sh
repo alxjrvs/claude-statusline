@@ -7,7 +7,8 @@
 #   "statusLine": { "type": "command", "command": "~/.claude/statusline.sh" }
 #
 # Reads the Claude Code statusline JSON on stdin and emits 3-5 colored lines:
-#   Line 1: repo/dir [@branch(/worktree)][#N:state][counters][+N/-M]
+#   Line 1: repo/dir [@branch(/worktree)][counters][+N/-M]  (wraps if it won't
+#           fit the pane; no PR chip — Claude Code already surfaces the PR)
 #   Line 2: [model ctxflag effort style] $cost ($/h)
 #   Line 3: CTX <bar w/ amber autocompact cell> N% Nk/Nk cache N% N%->AC [200k+]
 #   Line 4: 5h  <bar> N% Xh Ym left [delta]   (+ inline "7d N%" when 7d hidden)
@@ -32,7 +33,6 @@ PIP_MARKER='|'   # clock / threshold   (marker color)
 PIP_PROJ='*'     # burn projection     (yellow)
 PIP_OVERFLOW='!' # projection overflow (bold red)
 SIG_BRANCH='@'   # branch    (evokes git @/HEAD)
-SIG_PR='#'       # pull request
 
 # ── Color capability ────────────────────────────────────────────────────────
 # Honor NO_COLOR (https://no-color.org) and dumb terminals; detect truecolor so
@@ -279,17 +279,6 @@ render_bar() {
   printf '%s%s' "$out" "$RST"
 }
 
-# Color for a PR review_state (case-insensitive).
-pr_state_color() {
-  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
-    approved) printf '%s' "$GREEN" ;;
-    changes_requested) printf '%s' "$RED" ;;
-    review_required | pending) printf '%s' "$YELLOW" ;;
-    commented) printf '%s' "$CYAN" ;;
-    *) printf '%s' "$MUTED" ;;
-  esac
-}
-
 # Last two path components, with $HOME → ~ (mirrors last_two_components).
 dir_display() {
   local p=$1 home=$HOME shown rel
@@ -345,8 +334,6 @@ fields=$(printf '%s' "$input" | jq -r '
   "duration_ms=\(.cost.total_duration_ms // 0 | tostring)",
   "lines_added=\(.cost.total_lines_added // 0 | tostring)",
   "lines_removed=\(.cost.total_lines_removed // 0 | tostring)",
-  "pr_number=\(.pr.number // "" | tostring)",
-  "pr_state=\(.pr.review_state // "")",
   "exceeds_200k=\(if .exceeds_200k_tokens == true then "1" else "" end)",
   "five_pct=\(.rate_limits.five_hour.used_percentage // "" | tostring)",
   "five_resets_at=\(.rate_limits.five_hour.resets_at // "" | tostring)",
@@ -360,7 +347,7 @@ worktree_name_input="" project_dir="" cwd_input=""
 repo_host="" repo_owner="" repo_name_input=""
 model_name="" effort_level="" output_style="" cost_usd="" duration_ms=0
 lines_added=0
-lines_removed=0 pr_number="" pr_state="" exceeds_200k="" five_pct=""
+lines_removed=0 exceeds_200k="" five_pct=""
 five_resets_at="" seven_pct="" seven_resets_at="" cols=""
 
 while IFS= read -r _kv || [ -n "$_kv" ]; do
@@ -385,8 +372,6 @@ while IFS= read -r _kv || [ -n "$_kv" ]; do
     duration_ms) duration_ms=$_v ;;
     lines_added) lines_added=$_v ;;
     lines_removed) lines_removed=$_v ;;
-    pr_number) pr_number=$_v ;;
-    pr_state) pr_state=$_v ;;
     exceeds_200k) exceeds_200k=$_v ;;
     five_pct) five_pct=$_v ;;
     five_resets_at) five_resets_at=$_v ;;
@@ -526,19 +511,28 @@ else
   wt_max=24
 fi
 
-# ── Line 1 ──────────────────────────────────────────────────────────────────
+# ── Line 1 (hard-bounded; wraps to continuation lines when it won't fit) ─────
+# Title: repo name (linked) or the cwd's last two components, truncated to the
+# pane so an enormous name can't overflow on its own.
+if [ -n "$repo_name" ]; then title_txt=$repo_name; else title_txt=$dir_disp; fi
+[ -n "$cols" ] && title_txt=$(trunc_mid "$title_txt" "$cols")
 if [ -n "$repo_name" ]; then
-  id_part="${BOLD}${NEAR_WHITE}$(osc8 "$repo_https" "$repo_name")${RST}"
+  id_part="${BOLD}${NEAR_WHITE}$(osc8 "$repo_https" "$title_txt")${RST}"
 else
-  id_part="${BOLD}${NEAR_WHITE}${dir_disp}${RST}"
+  id_part="${BOLD}${NEAR_WHITE}${title_txt}${RST}"
 fi
-# One space after the repo "title"; bracket groups below append flush (no gaps).
-line1="$id_part "
+
+# Bracket groups are assembled as (display, visible-length) segments, then packed
+# onto lines below — the length twin lets the packer measure width without the
+# ANSI/OSC8 noise in the display string.
+seg_disp=() seg_len=()
+add_seg() { seg_disp[${#seg_disp[@]}]=$1; seg_len[${#seg_len[@]}]=$2; }
 
 # Worktree name (Claude's payload first, else the git worktree dir basename).
 wt=$worktree_name_input
 [ -z "$wt" ] && wt=$git_worktree_name
 
+# Branch group: [@<branch>(/<worktree>)] — branch blue/linked, /worktree magenta.
 if [ "$git_is_repo" -eq 1 ] || [ -n "$branch" ]; then
   b=$branch
   [ -z "$b" ] && b="-"
@@ -549,44 +543,62 @@ if [ "$git_is_repo" -eq 1 ] || [ -n "$branch" ]; then
   else
     b_disp=$b_txt
   fi
-  # In a worktree, fold branch + worktree into one cell: @<branch>/<worktree>
-  # (branch stays blue/linked; the /<worktree> suffix keeps worktree-magenta).
-  [ -n "$wt" ] && b_disp="${b_disp}${MAGENTA}/$(trunc_mid "$wt" "$wt_max")"
-  line1="${line1}${MUTED}[${BLUE}${BOLD}${SIG_BRANCH}${b_disp}${RST}${MUTED}]${RST}"
+  glen=$((3 + ${#b_txt})) # "[" + "@" + "]" + branch text
+  if [ -n "$wt" ]; then
+    wt_txt=$(trunc_mid "$wt" "$wt_max")
+    b_disp="${b_disp}${MAGENTA}/${wt_txt}"
+    glen=$((glen + 1 + ${#wt_txt})) # "/" + worktree text
+  fi
+  add_seg "${MUTED}[${BLUE}${BOLD}${SIG_BRANCH}${b_disp}${RST}${MUTED}]${RST}" "$glen"
 fi
 
-if [ -n "$pr_number" ]; then
-  if [ -n "$repo_https" ]; then
-    pr_id=$(osc8 "$repo_https/pull/$pr_number" "${SIG_PR}${pr_number}")
+# Counters group: [stash, conflict, untracked, modified, staged, ahead, behind].
+counters="" counters_plain=""
+add_counter() {
+  if [ -z "$counters" ]; then
+    counters=$1 counters_plain=$2
   else
-    pr_id="${SIG_PR}${pr_number}"
+    counters="${counters}${MUTED}, ${RST}$1" counters_plain="${counters_plain}, $2"
   fi
-  if [ -z "$pr_state" ]; then
-    line1="${line1}${MUTED}[${CYAN}${BOLD}${pr_id}${RST}${MUTED}]${RST}"
-  else
-    pc=$(pr_state_color "$pr_state")
-    line1="${line1}${MUTED}[${CYAN}${BOLD}${pr_id}${RST}${MUTED}:${pc}${pr_state}${MUTED}]${RST}"
-  fi
-fi
-
-# Counters (stash, conflict, untracked, modified, staged, ahead, behind).
-counters=""
-add_counter() { [ -z "$counters" ] && counters=$1 || counters="${counters}${MUTED}, ${RST}$1"; }
+}
 plur() { [ "$1" -eq 1 ] && printf '%s' "$2" || printf '%s' "$3"; }
+[ "$stash" -gt 0 ] && { w=$(plur "$stash" stash stashes); add_counter "${MAGENTA}${stash} ${w}${RST}" "${stash} ${w}"; }
+[ "$conflict" -gt 0 ] && { w=$(plur "$conflict" conflict conflicts); add_counter "${BOLD}${RED}${conflict} ${w}${RST}" "${conflict} ${w}"; }
+[ "$untracked" -gt 0 ] && add_counter "${CYAN}${untracked} untracked${RST}" "${untracked} untracked"
+[ "$unstaged" -gt 0 ] && add_counter "${YELLOW}${unstaged} modified${RST}" "${unstaged} modified"
+[ "$staged" -gt 0 ] && add_counter "${GREEN}${staged} staged${RST}" "${staged} staged"
+[ "$ahead" -gt 0 ] && add_counter "${GREEN}${ahead} ahead${RST}" "${ahead} ahead"
+[ "$behind" -gt 0 ] && add_counter "${RED}${behind} behind${RST}" "${behind} behind"
+[ -n "$counters" ] && add_seg "${MUTED}[${RST}${counters}${MUTED}]${RST}" $((2 + ${#counters_plain}))
 
-[ "$stash" -gt 0 ] && add_counter "${MAGENTA}${stash} $(plur "$stash" stash stashes)${RST}"
-[ "$conflict" -gt 0 ] && add_counter "${BOLD}${RED}${conflict} $(plur "$conflict" conflict conflicts)${RST}"
-[ "$untracked" -gt 0 ] && add_counter "${CYAN}${untracked} untracked${RST}"
-[ "$unstaged" -gt 0 ] && add_counter "${YELLOW}${unstaged} modified${RST}"
-[ "$staged" -gt 0 ] && add_counter "${GREEN}${staged} staged${RST}"
-[ "$ahead" -gt 0 ] && add_counter "${GREEN}${ahead} ahead${RST}"
-[ "$behind" -gt 0 ] && add_counter "${RED}${behind} behind${RST}"
-[ -n "$counters" ] && line1="${line1}${MUTED}[${RST}${counters}${MUTED}]${RST}"
-
+# Lines-changed group: [+added/-removed].
 if [ "$lines_added" -gt 0 ] || [ "$lines_removed" -gt 0 ]; then
-  line1="${line1}${MUTED}[${GREEN}${BOLD}+${lines_added}${RST}${MUTED}/${RED}${BOLD}-${lines_removed}${RST}${MUTED}]${RST}"
+  lc_plain="+${lines_added}/-${lines_removed}"
+  add_seg "${MUTED}[${GREEN}${BOLD}+${lines_added}${RST}${MUTED}/${RED}${BOLD}-${lines_removed}${RST}${MUTED}]${RST}" $((2 + ${#lc_plain}))
 fi
-printf '%s\n' "$line1"
+
+# Pack the groups onto lines: the title starts line 1; each group joins the
+# current line when it still fits within `cols`, otherwise it starts a fresh
+# continuation line. One space sits between the title and the first group; groups
+# otherwise butt together (matching the original flush layout). When cols is
+# unknown there's no bound to enforce, so everything rides a single line.
+title_len=${#title_txt}
+cur_disp=$id_part cur_len=$title_len title_only=1
+i=0 nseg=${#seg_len[@]}
+while [ "$i" -lt "$nseg" ]; do
+  sep=0
+  [ "$title_only" -eq 1 ] && [ "$title_len" -gt 0 ] && sep=1
+  cost=$((sep + ${seg_len[i]}))
+  if [ -n "$cols" ] && [ "$cur_len" -gt 0 ] && [ $((cur_len + cost)) -gt "$cols" ]; then
+    printf '%s\n' "$cur_disp"
+    cur_disp=${seg_disp[i]} cur_len=${seg_len[i]} title_only=0
+  else
+    [ "$sep" -eq 1 ] && cur_disp="${cur_disp} ${seg_disp[i]}" || cur_disp="${cur_disp}${seg_disp[i]}"
+    cur_len=$((cur_len + cost)) title_only=0
+  fi
+  i=$((i + 1))
+done
+printf '%s\n' "$cur_disp"
 
 # ── Line 2: model · ctx flag · effort · style · cost — distinct colors ───────
 # "Opus 4.8 (1M context)" + "high" + "Explanatory" + $cost ->

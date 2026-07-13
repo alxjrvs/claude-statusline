@@ -1,0 +1,5 @@
+proj/claude-statusline [@feature/..es-here]
+[1 untracked, 1 modified][+120/-45]
+[Opus 4.8]
+CTX ##------------------|----  10% 20k/200k 70%->AC
+5h  no rate-limit data yet

@@ -19,13 +19,13 @@ small margin so they never overrun Claude's own chrome. The layout stays compact
 lines, with cost folded onto the model line and the 7-day window shown only when it's the
 binding one.
 
-- **Line 1** — repo (links to GitHub), branch, worktree, PR + review state, git counters (stash/conflict/untracked/modified/staged/ahead/behind), session churn `+added/-removed`. Long branch/worktree names are middle-ellipsized (`feature/some-l..name-here`) to a width budget so line 1 never wraps.
+- **Line 1** — repo (links to GitHub), branch, worktree, git counters (stash/conflict/untracked/modified/staged/ahead/behind), session churn `+added/-removed`. Long branch/worktree names are middle-ellipsized (`feature/some-l..name-here`) to a width budget; if the groups still don't fit the pane, line 1 wraps the overflow onto continuation lines rather than running off the right edge. (No PR cell — Claude Code already surfaces the current PR.)
 - **Line 2** — model, context-window flag (`1M` for the extended window), reasoning effort, output style, and session cost + `$/h` burn rate.
 - **Line 3** — context window with a blackbody-gradient bar; an amber cell marks the autocompact threshold. The `%` escalates green→amber→red as it approaches; below the threshold a `N%->AC` badge shows live headroom, and once crossed a `[AC]` chip (plus `[200k+]` past 200k tokens). Trailing `Nk/Nk` is tokens-in-context / window size, and `cache N%` is the share served from the prompt cache.
 - **Line 4** — the 5-hour rate-limit window. The blue pip is the wall-clock position in the window; the yellow pip projects end-of-window usage at the current burn rate; `time left` counts down to the reset; `[+N%]` is usage-vs-clock delta. When the 7-day window isn't binding it rides here as a compact `7d N%` badge.
 - **Line 5** — the 7-day window, shown as its own bar only when it's ≥50% or busier than the 5-hour window.
 
-Repo/branch/PR cells are OSC8 hyperlinks — ⌘-click them in a supporting terminal.
+Repo and branch cells are OSC8 hyperlinks — ⌘-click them in a supporting terminal.
 
 Colors honor [`NO_COLOR`](https://no-color.org) and degrade to a 256-color ramp on
 terminals without truecolor (`COLORTERM`); the ASCII pip shapes keep the bars legible even
