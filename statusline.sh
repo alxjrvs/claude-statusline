@@ -541,7 +541,10 @@ fi
 # onto lines below — the length twin lets the packer measure width without the
 # ANSI/OSC8 noise in the display string.
 seg_disp=() seg_len=()
-add_seg() { seg_disp[${#seg_disp[@]}]=$1; seg_len[${#seg_len[@]}]=$2; }
+add_seg() {
+  seg_disp[${#seg_disp[@]}]=$1
+  seg_len[${#seg_len[@]}]=$2
+}
 
 # Name group: [agent] or [session] — the "which of my many concurrent sessions
 # is this?" orientation cell. agent.name (a spawned/--agent context) wins over
@@ -595,13 +598,13 @@ add_counter() {
     counters="${counters} $1" counters_plain="${counters_plain} $2"
   fi
 }
-[ "$stash" -gt 0 ]     && add_counter "${MAGENTA}*${stash}${RST}"       "*${stash}"
-[ "$conflict" -gt 0 ]  && add_counter "${BOLD}${RED}x${conflict}${RST}" "x${conflict}"
-[ "$untracked" -gt 0 ] && add_counter "${CYAN}?${untracked}${RST}"      "?${untracked}"
-[ "$unstaged" -gt 0 ]  && add_counter "${YELLOW}!${unstaged}${RST}"     "!${unstaged}"
-[ "$staged" -gt 0 ]    && add_counter "${GREEN}+${staged}${RST}"        "+${staged}"
-[ "$ahead" -gt 0 ]     && add_counter "${GREEN}^${ahead}${RST}"         "^${ahead}"
-[ "$behind" -gt 0 ]    && add_counter "${RED}v${behind}${RST}"          "v${behind}"
+[ "$stash" -gt 0 ] && add_counter "${MAGENTA}*${stash}${RST}" "*${stash}"
+[ "$conflict" -gt 0 ] && add_counter "${BOLD}${RED}x${conflict}${RST}" "x${conflict}"
+[ "$untracked" -gt 0 ] && add_counter "${CYAN}?${untracked}${RST}" "?${untracked}"
+[ "$unstaged" -gt 0 ] && add_counter "${YELLOW}!${unstaged}${RST}" "!${unstaged}"
+[ "$staged" -gt 0 ] && add_counter "${GREEN}+${staged}${RST}" "+${staged}"
+[ "$ahead" -gt 0 ] && add_counter "${GREEN}^${ahead}${RST}" "^${ahead}"
+[ "$behind" -gt 0 ] && add_counter "${RED}v${behind}${RST}" "v${behind}"
 [ -n "$counters" ] && add_seg "${MUTED}[${RST}${counters}${MUTED}]${RST}" $((2 + ${#counters_plain}))
 
 # Lines-changed group: [+added/-removed].
@@ -691,7 +694,7 @@ i=0 nseg=${#seg_len[@]}
 while [ "$i" -lt "$nseg" ]; do
   sep=0
   [ "$title_only" -eq 1 ] && [ "$title_len" -gt 0 ] && sep=1
-  cost=$((sep + ${seg_len[i]}))
+  cost=$((sep + seg_len[i]))
   if [ -n "$cols" ] && [ "$cur_len" -gt 0 ] && [ $((cur_len + cost)) -gt "$cols" ]; then
     printf '%s\n' "$cur_disp"
     cur_disp=${seg_disp[i]} cur_len=${seg_len[i]} title_only=0

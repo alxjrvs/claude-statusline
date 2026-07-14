@@ -98,13 +98,13 @@ NONGIT=$(mktemp -d)
 trap 'rm -rf "$NONGIT" "$GITREPO"' EXIT
 cd "$NONGIT" || exit 2
 
-snapshot normal          120 "$P_NORMAL"
-snapshot seven-binding   120 "$P_SEVEN_BINDING"
-snapshot autocompact     120 "$P_AUTOCOMPACT"
-snapshot near-ac         120 "$P_NEAR_AC"
-snapshot fresh-no-rate   120 "$P_FRESH"
-snapshot narrow          60  "$P_NORMAL"
-snapshot rich-line1      120 "$P_RICH"
+snapshot normal 120 "$P_NORMAL"
+snapshot seven-binding 120 "$P_SEVEN_BINDING"
+snapshot autocompact 120 "$P_AUTOCOMPACT"
+snapshot near-ac 120 "$P_NEAR_AC"
+snapshot fresh-no-rate 120 "$P_FRESH"
+snapshot narrow 60 "$P_NORMAL"
+snapshot rich-line1 120 "$P_RICH"
 
 # ── Color-mode assertions (non-git) ─────────────────────────────────────────
 esc=$(printf '\033')
@@ -128,8 +128,10 @@ case "$out_256" in *"${esc}[38;2;"*) c=1 ;; *) c=0 ;; esac
 assert "256-color: no truecolor escapes" "$c"
 
 # Must always exit 0 — in BOTH 7d states (the trailing conditional is a trap).
-run_sl 120 "$P_NORMAL" > /dev/null; assert "exit 0 when 7d hidden" "$?"
-run_sl 120 "$P_SEVEN_BINDING" > /dev/null; assert "exit 0 when 7d shown" "$?"
+run_sl 120 "$P_NORMAL" > /dev/null
+assert "exit 0 when 7d hidden" "$?"
+run_sl 120 "$P_SEVEN_BINDING" > /dev/null
+assert "exit 0 when 7d shown" "$?"
 
 # ── Width discipline: no line may exceed COLUMNS ─────────────────────────────
 # The bars stretch to fill the row, so the width math must reserve room for each
@@ -166,7 +168,10 @@ GITREPO=$(mktemp -d)
   git add f.txt
   git -c user.name=t -c user.email=t@t -c commit.gpgsign=false -c core.hooksPath=/dev/null \
     commit -q --no-verify -m init
-) > /dev/null 2>&1 || { printf 'FAIL     git fixture setup\n'; FAIL=$((FAIL + 1)); }
+) > /dev/null 2>&1 || {
+  printf 'FAIL     git fixture setup\n'
+  FAIL=$((FAIL + 1))
+}
 cd "$GITREPO" || exit 2
 # Payload supplies a stable title dir; git supplies the (long) branch.
 P_LONGBRANCH='{"workspace":{"current_dir":"/work/proj/claude-statusline"},"context_window":{"used_percentage":10,"total_input_tokens":20000,"context_window_size":200000},"model":{"display_name":"Opus 4.8"}}'

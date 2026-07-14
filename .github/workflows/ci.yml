@@ -1,0 +1,41 @@
+name: ci
+
+# Lints and tests the statusline scripts on every push to main and every PR.
+# Mirrors the dotFiles lint.yml style: mise installs the lint tools, then
+# shellcheck + shfmt run over the tracked shell scripts, and the snapshot
+# suite renders the statusline against fixtures. Test only — nothing here
+# mutates state or touches ~/.local/bin.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Install the lint/test tools pinned in mise.toml (shellcheck, shfmt, jq)
+      # and put their shims on PATH.
+      - uses: jdx/mise-action@v2
+
+      # Every tracked shell script. -x follows `source`d files (none today,
+      # but keeps parity with dotFiles and is future-proof).
+      - name: shellcheck
+        run: shellcheck -x $(git ls-files '*.sh')
+
+      # Same flags as dotFiles lint.yml (2-space indent, switch-case indent,
+      # redirect-operator spacing).
+      - name: shfmt
+        run: shfmt -d -i 2 -ci -sr $(git ls-files '*.sh')
+
+      # Snapshot suite: renders statusline.sh against fixture payloads and diffs
+      # the ANSI-stripped output against test/golden/, plus color-mode and
+      # exit-code assertions. Bash 3.2-safe; needs jq (present on ubuntu-latest).
+      - name: tests
+        run: bash test/run.sh
