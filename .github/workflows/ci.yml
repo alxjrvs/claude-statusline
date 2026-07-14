@@ -36,6 +36,6 @@ jobs:
 
       # Snapshot suite: renders statusline.sh against fixture payloads and diffs
       # the ANSI-stripped output against test/golden/, plus color-mode and
-      # exit-code assertions. Needs bash 4+/jq (present on ubuntu-latest).
+      # exit-code assertions. Bash 3.2-safe; needs jq (present on ubuntu-latest).
       - name: tests
         run: bash test/run.sh

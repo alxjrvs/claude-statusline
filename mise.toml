@@ -2,6 +2,6 @@
 # The scripts themselves need only `git` + `jq` at runtime; these are the
 # tools CI uses to lint and test them.
 [tools]
-shellcheck = "latest"
-shfmt = "latest"
-jq = "latest"
+shellcheck = "0.11"
+shfmt = "3.13"
+jq = "1.8"
