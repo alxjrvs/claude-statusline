@@ -1,0 +1,7 @@
+# Dev/lint toolchain for this repo (CI installs these via mise-action).
+# The scripts themselves need only `git` + `jq` at runtime; these are the
+# tools CI uses to lint and test them.
+[tools]
+shellcheck = "latest"
+shfmt = "latest"
+jq = "latest"

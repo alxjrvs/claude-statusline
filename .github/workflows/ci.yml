@@ -20,12 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # PATH + shims for the lint tools only — no full toolchain install.
+      # Install the lint/test tools pinned in mise.toml (shellcheck, shfmt, jq)
+      # and put their shims on PATH.
       - uses: jdx/mise-action@v2
-        with:
-          install: false
-      - name: Install lint tools
-        run: mise install shellcheck shfmt jq
 
       # Every tracked shell script. -x follows `source`d files (none today,
       # but keeps parity with dotFiles and is future-proof).
